@@ -1,0 +1,771 @@
+---
+title: "Evaluate the safety and efficacy of potential CARs and logic-gated CARs across datasets"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+```
+
+# enables R to show special characters like ≤
+```{r}
+
+#install.packages("showtext")
+library(showtext) # this package enables R to show special characters like ≤
+# Add a font and enable `showtext`
+font_add(family = "Arial", regular = "path/to/arial.ttf")  # Replace with the path to your Arial font file
+showtext_auto()
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
+surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+
+# Define custom colors for each group
+group_colors <- c(
+  "LogiCAR (N = 5)" = "#08306b",  # Deep blue
+  "LogiCAR (N = 4)" = "#2171b5",  # Dark blue
+  "LogiCAR (N = 3)" = "#4292c6",  # Medium blue
+  "LogiCAR (N = 2)" = "#6baed6",  # Light blue
+  "LogiCAR (N = 1)" = "#9ecae1",  # Very light blue
+  "Kwon et al." = "#006d2c",      # Deep green
+  "Dannenfelser et al." = "#41ab5d",  # Light green
+  "Clinical (BRCA)" = "#cb181d",  # Deep red
+  "Clinical (other tumors)" = "#fb6a4a"  # Light red (pink)
+)
+
+```
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+
+# load and process input data (CAR targets, HPA scRNAseq seurat, HPA protein expression matrix)
+```{r}
+
+# local
+HPA_data_dir_RNA = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/"
+HPA_data_dir_protein = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/protein/"
+
+# server
+# HPA_data_dir_RNA = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/HPA/version24_20241022/"
+# HPA_data_dir_protein = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/HPA/version24_20241022/"
+
+###### load candidate CARs and logic-gated CARs
+candidate_CARs_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+### select N<=3 candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$geneNum <=3, ]
+
+### rank first by group2, then by efficacy
+plot_order = rev(c("LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)"))
+candidate_CARs_df$Group2 = factor(candidate_CARs_df$Group2, levels = plot_order)
+candidate_CARs_df$Efficacy_mean = rowMeans(candidate_CARs_df[grepl("Effic", colnames(candidate_CARs_df))])
+candidate_CARs_df <- candidate_CARs_df[order(candidate_CARs_df$Group2, -candidate_CARs_df$Efficacy_mean), ]
+
+candidate_CARs = candidate_CARs_df$LogiCARs
+candidate_CARs_display = candidate_CARs_df$LogiCARs_display
+cleaned_combos <- gsub("[|&()]", "", candidate_CARs)  # Remove |, &, (, )
+cleaned_combos <- gsub("_not", "", cleaned_combos)    # Remove _not
+all_genes <- unlist(strsplit(cleaned_combos, "\\s+"))
+unique_CARtargets_measured <- unique(all_genes)
+
+
+###### load HPA protein data
+load(paste0(HPA_data_dir_protein,"HPA_protein_expression_matrix_Tissues_withUncertainProteins.rdata")) # var name: expression_matrix_Tissues
+load(paste0(HPA_data_dir_protein,"HPA_protein_expression_matrix_CellGroups_withUncertainProteins.rdata")) # var name: expression_matrix_Cells
+HPA_Protein_matrix_Tissues <- expression_matrix_Tissues
+## convert - in gene names to _
+rownames(HPA_Protein_matrix_Tissues) <- gsub("-", "_", rownames(HPA_Protein_matrix_Tissues))
+HPA_Protein_matrix_Cells <- expression_matrix_Cells
+## convert - in gene names to _
+rownames(HPA_Protein_matrix_Cells) <- gsub("-", "_", rownames(HPA_Protein_matrix_Cells))
+rm(expression_matrix_Tissues, expression_matrix_Cells)
+allGenes_HPA_protein = intersect(rownames(HPA_Protein_matrix_Tissues), rownames(HPA_Protein_matrix_Cells)) 
+length(allGenes_HPA_protein) # 11141 without uncertain proteins; 13463 with uncertain proteins
+
+
+### process HPA protein expression data
+## cell level protein expression matrix HPA_Protein_matrix_Cells
+HPA_Protein_matrix_Cells_filled <- matrix(
+  NA, 
+  nrow = length(unique_CARtargets_measured), 
+  ncol = ncol(HPA_Protein_matrix_Cells),
+  dimnames = list(unique_CARtargets_measured, colnames(HPA_Protein_matrix_Cells))
+)
+# Fill in the existing data
+common_rows <- intersect(rownames(HPA_Protein_matrix_Cells), unique_CARtargets_measured)
+HPA_Protein_matrix_Cells_filled[common_rows, ] <- HPA_Protein_matrix_Cells[common_rows, ]
+# Resulting matrix will include all rows from unique_CARtargets_measured, with NAs for missing rows
+HPA_Protein_matrix_Cells <- HPA_Protein_matrix_Cells_filled
+HPA_Protein_matrix_Cells <- t(HPA_Protein_matrix_Cells)
+
+HPA_Protein_matrix_Cells_negated <- 3 - HPA_Protein_matrix_Cells # use max value to subtract 
+colnames(HPA_Protein_matrix_Cells_negated) = paste0(colnames(HPA_Protein_matrix_Cells_negated), "_not")
+
+HPA_Protein_matrix_Cells_final_matrix <- cbind(HPA_Protein_matrix_Cells, HPA_Protein_matrix_Cells_negated)
+dim(HPA_Protein_matrix_Cells_final_matrix)
+HPA_Protein_matrix_Cells_final_matrix[1:5,1:5]
+# Remove the row named "Visual"
+HPA_Protein_matrix_Cells_final_matrix <- HPA_Protein_matrix_Cells_final_matrix[
+  rownames(HPA_Protein_matrix_Cells_final_matrix) != "Visual", 
+  ]
+
+## tissue level protein expression matrix HPA_Protein_matrix_Tissues
+HPA_Protein_matrix_Tissues_filled <- matrix(
+  NA, 
+  nrow = length(unique_CARtargets_measured), 
+  ncol = ncol(HPA_Protein_matrix_Tissues),
+  dimnames = list(unique_CARtargets_measured, colnames(HPA_Protein_matrix_Tissues))
+)
+# Fill in the existing data
+common_rows <- intersect(rownames(HPA_Protein_matrix_Tissues), unique_CARtargets_measured)
+HPA_Protein_matrix_Tissues_filled[common_rows, ] <- HPA_Protein_matrix_Tissues[common_rows, ]
+# Resulting matrix will include all rows from unique_CARtargets_measured, with NAs for missing rows
+HPA_Protein_matrix_Tissues <- HPA_Protein_matrix_Tissues_filled
+HPA_Protein_matrix_Tissues <- t(HPA_Protein_matrix_Tissues)
+
+HPA_Protein_matrix_Tissues_negated <- 3 - HPA_Protein_matrix_Tissues # use max value to subtract 
+colnames(HPA_Protein_matrix_Tissues_negated) = paste0(colnames(HPA_Protein_matrix_Tissues_negated), "_not")
+
+HPA_Protein_matrix_Tissues_final_matrix <- cbind(HPA_Protein_matrix_Tissues, HPA_Protein_matrix_Tissues_negated)
+dim(HPA_Protein_matrix_Tissues_final_matrix)
+HPA_Protein_matrix_Tissues_final_matrix[1:5,1:5]
+# Remove the row named "Visual"
+HPA_Protein_matrix_Tissues_final_matrix <- HPA_Protein_matrix_Tissues_final_matrix[
+  rownames(HPA_Protein_matrix_Tissues_final_matrix) != "Visual", 
+  ]
+
+
+
+### load HPA RNA data
+seu_HPA_RNA = readRDS(file = paste0(paste0(HPA_data_dir_RNA,"seu_HPA_v24.rds")))  # 20025 features across 689601 samples within 1 assay 
+seu_HPA_RNA <- NormalizeData(seu_HPA_RNA) # log(x/sum(x)*10000+1)
+
+genes_HPA_RNA = rownames(seu_HPA_RNA)
+seu_HPA_RNA_counts_matrix <- GetAssayData(seu_HPA_RNA, layer = "data")
+data_HPA_df_onlyData = seu_HPA_RNA_counts_matrix[unique_CARtargets_measured, , drop = F]
+data_HPA_df_onlyData <- t(data_HPA_df_onlyData)
+
+# Calculate the column-wise maximums
+colMax <- apply(data_HPA_df_onlyData, 2, max, na.rm = TRUE)
+# Subtract the original matrix values from the column-wise maximums
+data_HPA_df_onlyData_negated <- sweep(data_HPA_df_onlyData, 2, colMax, FUN = function(x, y) y - x)
+colnames(data_HPA_df_onlyData_negated) = paste0(colnames(data_HPA_df_onlyData_negated), "_not")
+
+data_HPA_final_matrix <- cbind(data_HPA_df_onlyData, data_HPA_df_onlyData_negated)
+dim(data_HPA_final_matrix)
+data_HPA_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_HPA_final_matrix) = gsub("-", "_", colnames(data_HPA_final_matrix))
+max(data_HPA_final_matrix)
+dim(data_HPA_final_matrix)
+
+
+```
+
+# Figure 3a (left). dotplot of RNA expression versus tissues or cell types
+```{r}
+
+candidateCARs_equivalent_RNA_Expression_res_list <- calcEquivalentExpression2(candidate_CARs, data_HPA_final_matrix) 
+
+### Convert the list to a data frame
+candidateCARs_equivalent_RNA_Expression_res_df <- as.data.frame(candidateCARs_equivalent_RNA_Expression_res_list)
+colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- names(candidateCARs_equivalent_RNA_Expression_res_list)
+candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_res_df[candidate_CARs]
+colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- candidate_CARs_display
+
+#unique(seu_HPA_RNA$Tissue_grouped)
+#unique(seu_HPA_RNA$cell_group_custom) # remove Unspecified and Mixed
+
+candidateCARs_equivalent_RNA_Expression_res_df$Tissue_grouped = seu_HPA_RNA$Tissue_grouped
+candidateCARs_equivalent_RNA_Expression_res_df$cell_group_custom = as.character(seu_HPA_RNA$cell_group_custom)
+
+candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_res_df[!(candidateCARs_equivalent_RNA_Expression_res_df$cell_group_custom %in% c("Unspecified", "Mixed")), ] # from 689601 -> 671927
+candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_res_df[!(candidateCARs_equivalent_RNA_Expression_res_df$Tissue_grouped %in% c("Unspecified")), ] # from 671927 -> 671927
+
+save(candidateCARs_equivalent_RNA_Expression_res_df, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/candidateCARs_77_equivalent_RNA_Expression_res_df_v2.rdata")
+
+
+cells_reordered = c(
+  "Heart muscle", "Neuronal", "Liver epithelial", "Alveolar", "Urinary epithelial", "Hematopoietic", "Endocrine", "Integumentary", "Endothelial/vascular", 
+  "Gastrointestinal epithelial", "Immune", 
+  "Female reproductive", "Male reproductive", 
+  "Visual", "Skeletal/smooth muscle", "General/glandular epithelial", "Glial", "Connective/stromal", "Undifferentiated")
+
+setdiff(candidateCARs_equivalent_RNA_Expression_res_df$cell_group_custom, cells_reordered)
+setdiff(cells_reordered, candidateCARs_equivalent_RNA_Expression_res_df$cell_group_custom)
+
+tissues_reordered = c(
+  "Heart", "Brain", "Hepatobiliary", "Lung", "Urinary", "Pancreas", "Bone marrow", "Integumentary", "Vascular",
+  "Gastrointestinal", "Lymphoid", "Female reproductive", "Male reproductive", 
+  "Visual", "Skeletal/smooth muscle", "Oral", "Conducting airways", "Connective")
+
+setdiff(candidateCARs_equivalent_RNA_Expression_res_df$Tissue_grouped, tissues_reordered)
+setdiff(tissues_reordered, candidateCARs_equivalent_RNA_Expression_res_df$Tissue_grouped)
+
+# Gather the data into long format
+genes <- rev(candidate_CARs_display)
+dotplot_data <- candidateCARs_equivalent_RNA_Expression_res_df %>%
+  pivot_longer(
+    cols = all_of(genes),
+    names_to = "Gene",
+    values_to = "Expression"
+  )
+
+
+################## plot tissue RNA expression dotplot ################## 
+# Calculate required metrics: zero ratio and mean expression for each Tissue-Gene combination
+plot_data <- dotplot_data %>%
+  group_by(Tissue_grouped, Gene) %>%
+  summarise(
+    ExprRatio = mean(Expression > 0, na.rm = TRUE), # Proportion of zeros
+    MeanExpression = mean(Expression, na.rm = TRUE), # Average expression
+    .groups = "drop"
+  )
+
+
+plot_data <- plot_data %>%
+  mutate(
+    Tissue_grouped = factor(Tissue_grouped, levels = tissues_reordered),
+    Gene = factor(Gene, levels = genes) # Keep genes in column order
+  )
+
+# Define a vector of colors for y-axis tick labels
+group_sizes <- rev(as.numeric(table(candidate_CARs_df$Group2)))
+group_names <- rev(names(table(candidate_CARs_df$Group2)))
+y_tick_colors <- rep(group_colors[group_names], times = group_sizes)
+
+# Create the plot
+pdf_file <- paste0(fig_dir,paste0("Figure3a_safety_landscape_RNA_tissue.pdf"))
+fig_width = 5.7
+fig_height = 12.5
+fontSize = 1.2
+pdf(pdf_file, onefile=FALSE, width = fig_width,height=fig_height)
+ggplot(plot_data, aes(x = Tissue_grouped, y = Gene)) +
+  geom_point(aes(size = ExprRatio, color = MeanExpression)) + # Dot size and color
+  scale_color_gradientn(
+    colors = c("#440154", "#31688E", "#35B779", "#FDE725"), # Define the four colors : "white", "lightgray", "darkgray", "black"   "#B0B0B0", "#F4A6A6", "#E53935", "#A31D1D".  "green", "yellow", "orange", "red".   "blue", "cyan", "yellow", "red".    "#440154", "#31688E", "#35B779", "#FDE725"
+    values = scales::rescale(c(0, 1, 2, 3)), # Define the positions for the colors
+    limits = c(0, 3), # Set the range of the gradient
+    oob = scales::squish, # Handle out-of-bound values
+    labels = c("No", "Low", "Medium", "High") # Custom labels for the ticks
+  ) +
+  scale_size_continuous(
+    range = c(1, 5), # Control dot size range
+    limits = c(0, 1) # Set the range of values for the legend
+  ) +
+  labs(
+    x = "",
+    y = "",
+    size = "Expressed\nratio",
+    color = "Mean\nexpression"
+  ) +
+  theme(panel.grid = element_blank(), 
+        panel.background = element_rect(fill = "white"),
+        axis.line.y = element_line(color="black"),
+        axis.line.x = element_line(color="black"),
+        axis.ticks.y = element_line(color="black"),
+        axis.ticks.x = element_line(color="black"),
+        panel.border = element_blank(), 
+        axis.text.y = element_text(color = y_tick_colors),  # Assign colors to y-axis tick labels
+        axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),  
+        legend.position = "right" # right none
+        )
+dev.off()
+
+
+
+
+################## plot cell type RNA expression dotplot ################## 
+# Calculate required metrics: zero ratio and mean expression for each Tissue-Gene combination
+plot_data <- dotplot_data %>%
+  group_by(cell_group_custom, Gene) %>%
+  summarise(
+    ExprRatio = mean(Expression > 0, na.rm = TRUE), # Proportion of zeros
+    MeanExpression = mean(Expression, na.rm = TRUE), # Average expression
+    .groups = "drop"
+  )
+
+
+plot_data <- plot_data %>%
+  mutate(
+    cell_group_custom = factor(cell_group_custom, levels = cells_reordered),
+    Gene = factor(Gene, levels = genes) # Keep genes in column order
+  )
+
+# Create the plot
+pdf_file <- paste0(fig_dir,paste0("Figure3a_safety_landscape_RNA_cellType.pdf"))
+fig_width = 5.7
+fig_height = 12.5
+fontSize = 1.2
+pdf(pdf_file, onefile=FALSE, width = fig_width,height=fig_height)
+ggplot(plot_data, aes(x = cell_group_custom, y = Gene)) +
+  geom_point(aes(size = ExprRatio, color = MeanExpression)) + # Dot size and color
+  scale_color_gradientn(
+    colors = c("#440154", "#31688E", "#35B779", "#FDE725"), # Define the four colors : "white", "lightgray", "darkgray", "black"   "#B0B0B0", "#F4A6A6", "#E53935", "#A31D1D".  "green", "yellow", "orange", "red".   "blue", "cyan", "yellow", "red".    "#440154", "#31688E", "#35B779", "#FDE725"
+    values = scales::rescale(c(0, 1, 2, 3)), # Define the positions for the colors
+    limits = c(0, 3), # Set the range of the gradient
+    oob = scales::squish, # Handle out-of-bound values
+    labels = c("No", "Low", "Medium", "High") # Custom labels for the ticks
+  ) +
+  scale_size_continuous(
+    range = c(1, 5), # Control dot size range
+    limits = c(0, 1) # Set the range of values for the legend
+  ) +
+  labs(
+    x = "",
+    y = "",
+    size = "Expressed\nratio",
+    color = "Mean\nexpression"
+  ) +
+  theme(panel.grid = element_blank(), 
+        panel.background = element_rect(fill = "white"),
+        axis.line.y = element_line(color="black"),
+        axis.line.x = element_line(color="black"),
+        axis.ticks.y = element_line(color="black"),
+        axis.ticks.x = element_line(color="black"),
+        axis.text.y = element_text(color = y_tick_colors),  # Assign colors to y-axis tick labels
+        panel.border = element_blank(), 
+        axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),  
+        legend.position = "right" # right none
+        )
+dev.off()
+
+
+```
+
+
+# Figure 3a (right). dotplot of protein expression versus tissues or cell types
+```{r}
+
+######################################### expression in Tissues #########################################
+candidateCARs_equivalent_Protein_Expression_res_list <- calcEquivalentExpression2(candidate_CARs, HPA_Protein_matrix_Tissues_final_matrix) 
+
+### Convert the list to a data frame
+candidateCARs_equivalent_Protein_Expression_res_df_Tissues <- as.data.frame(candidateCARs_equivalent_Protein_Expression_res_list)
+colnames(candidateCARs_equivalent_Protein_Expression_res_df_Tissues) <- names(candidateCARs_equivalent_Protein_Expression_res_list)
+candidateCARs_equivalent_Protein_Expression_res_df_Tissues = candidateCARs_equivalent_Protein_Expression_res_df_Tissues[candidate_CARs]
+colnames(candidateCARs_equivalent_Protein_Expression_res_df_Tissues) <- candidate_CARs_display
+
+candidateCARs_equivalent_Protein_Expression_res_df_Tissues$Tissue_grouped = rownames(candidateCARs_equivalent_Protein_Expression_res_df_Tissues)
+
+save(candidateCARs_equivalent_Protein_Expression_res_df_Tissues, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/candidateCARs_77_equivalent_Protein_Expression_res_df_Tissues_v2.rdata")
+
+
+tissues_reordered = c(
+  "Heart", "Brain", "Hepatobiliary", "Lung", "Urinary", "Pancreas", "Bone marrow", "Integumentary", "Endocrine",
+  "Gastrointestinal", "Lymphoid", "Female reproductive", "Male reproductive", 
+  "Skeletal/smooth muscle", "Oral", "Conducting airways", "Connective")
+
+setdiff(candidateCARs_equivalent_Protein_Expression_res_df_Tissues$Tissue_grouped, tissues_reordered)
+setdiff(tissues_reordered, candidateCARs_equivalent_Protein_Expression_res_df_Tissues$Tissue_grouped)
+
+# Gather the data into long format
+genes <- rev(candidate_CARs_display)
+dotplot_data <- candidateCARs_equivalent_Protein_Expression_res_df_Tissues %>%
+  pivot_longer(
+    cols = all_of(genes),
+    names_to = "Gene",
+    values_to = "Expression"
+  )
+
+
+################## plot tissue Protein expression dotplot ################## 
+# Calculate required metrics: zero ratio and mean expression for each Tissue-Gene combination
+plot_data <- dotplot_data %>%
+  group_by(Tissue_grouped, Gene) %>%
+  summarise(
+    ExprRatio = mean(Expression > 0, na.rm = TRUE), # Proportion of zeros
+    MeanExpression = mean(Expression, na.rm = TRUE), # Average expression
+    .groups = "drop"
+  )
+
+
+plot_data <- plot_data %>%
+  mutate(
+    Tissue_grouped = factor(Tissue_grouped, levels = tissues_reordered),
+    Gene = factor(Gene, levels = genes) # Keep genes in column order
+  )
+
+# Create the plot
+pdf_file <- paste0(fig_dir, "Figure3a_safety_landscape_Protein_tissue.pdf")
+fig_width = 5.7
+fig_height = 12.5
+fontSize <- 10 # Larger font size for axis tick labels
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+ggplot(plot_data, aes(x = Tissue_grouped, y = Gene)) +
+  # Main heatmap with MeanExpression
+  geom_tile(aes(fill = MeanExpression), width = 1, height = 1) +
+  # Add a cross for NA values
+  geom_text(data = subset(plot_data, is.na(MeanExpression)),
+            aes(x = Tissue_grouped, y = Gene, label = "X"),
+            color = "black", size = 3) + # Cross size and color
+  scale_fill_gradientn(
+    colors = c("#440154", "#31688E", "#35B779", "#FDE725"), # Gradient colors
+    values = scales::rescale(c(0, 1, 2, 3)), # Define color breakpoints
+    limits = c(0, 3), # Data limits
+    oob = scales::squish, # Handle out-of-bound values
+    na.value = "white", # White background for NA values
+    labels = c("No", "Low", "Medium", "High") # Custom labels for the legend
+  ) +
+  labs(
+    x = "",
+    y = "",
+    fill = "Mean\nexpression" # Update legend label for color
+  ) +
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_blank(), # Remove all borders
+    axis.line.x = element_line(color = "black"), # Keep x-axis line
+    axis.line.y = element_line(color = "black"), # Keep y-axis line
+    axis.ticks.length = unit(0.1, "cm"), # Increase tick length
+    axis.ticks.x = element_line(color = "black"), # Show x-axis ticks
+    axis.ticks.y = element_line(color = "black"), # Show y-axis ticks
+    axis.text.y = element_text(color = y_tick_colors),  # Assign colors to y-axis tick labels
+    axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1, size = fontSize), # Larger x-axis labels
+    axis.ticks.direction = "out", # Ticks face outward
+    legend.position = "right"
+  )
+dev.off()
+
+
+
+
+
+
+######################################### expression in Cells #########################################
+candidateCARs_equivalent_Protein_Expression_res_list <- calcEquivalentExpression2(candidate_CARs, HPA_Protein_matrix_Cells_final_matrix) 
+
+### Convert the list to a data frame
+candidateCARs_equivalent_Protein_Expression_res_df_Cells <- as.data.frame(candidateCARs_equivalent_Protein_Expression_res_list)
+colnames(candidateCARs_equivalent_Protein_Expression_res_df_Cells) <- names(candidateCARs_equivalent_Protein_Expression_res_list)
+candidateCARs_equivalent_Protein_Expression_res_df_Cells = candidateCARs_equivalent_Protein_Expression_res_df_Cells[candidate_CARs]
+colnames(candidateCARs_equivalent_Protein_Expression_res_df_Cells) <- candidate_CARs_display
+
+candidateCARs_equivalent_Protein_Expression_res_df_Cells$Cell_grouped = rownames(candidateCARs_equivalent_Protein_Expression_res_df_Cells)
+
+save(candidateCARs_equivalent_Protein_Expression_res_df_Cells, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/candidateCARs_77_equivalent_Protein_Expression_res_df_Cells_v2.rdata")
+
+Cells_reordered = c(
+  "Heart muscle", "Neuronal", "Liver epithelial", "Alveolar", "Urinary epithelial", "Hematopoietic", "Endocrine", "Integumentary", "Endothelial/vascular", 
+  "Gastrointestinal epithelial", "Immune", 
+  "Female reproductive", "Male reproductive", 
+  "Skeletal/smooth muscle", "General/glandular epithelial", "Glial", "Connective/stromal")
+
+setdiff(candidateCARs_equivalent_Protein_Expression_res_df_Cells$Cell_grouped, Cells_reordered)
+setdiff(Cells_reordered, candidateCARs_equivalent_Protein_Expression_res_df_Cells$Cell_grouped)
+
+# Gather the data into long format
+genes <- rev(candidate_CARs_display)
+dotplot_data <- candidateCARs_equivalent_Protein_Expression_res_df_Cells %>%
+  pivot_longer(
+    cols = all_of(genes),
+    names_to = "Gene",
+    values_to = "Expression"
+  )
+
+################## plot cell Protein expression dotplot ################## 
+# Calculate required metrics: zero ratio and mean expression for each Cell-Gene combination
+plot_data <- dotplot_data %>%
+  group_by(Cell_grouped, Gene) %>%
+  summarise(
+    ExprRatio = mean(Expression > 0, na.rm = TRUE), # Proportion of zeros
+    MeanExpression = mean(Expression, na.rm = TRUE), # Average expression
+    .groups = "drop"
+  )
+
+
+plot_data <- plot_data %>%
+  mutate(
+    Cell_grouped = factor(Cell_grouped, levels = Cells_reordered),
+    Gene = factor(Gene, levels = genes) # Keep genes in column order
+  )
+
+# Create the plot
+pdf_file <- paste0(fig_dir, "Figure3a_safety_landscape_Protein_Cell.pdf")
+fig_width = 5.7
+fig_height = 12.5
+fontSize <- 10 # Larger font size for axis tick labels
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+ggplot(plot_data, aes(x = Cell_grouped, y = Gene)) +
+  # Main heatmap with MeanExpression
+  geom_tile(aes(fill = MeanExpression), width = 1, height = 1) +
+  # Add a cross for NA values
+  geom_text(data = subset(plot_data, is.na(MeanExpression)),
+            aes(x = Cell_grouped, y = Gene, label = "X"),
+            color = "black", size = 3) + # Cross size and color
+  scale_fill_gradientn(
+    colors = c("#440154", "#31688E", "#35B779", "#FDE725"), # Gradient colors
+    values = scales::rescale(c(0, 1, 2, 3)), # Define color breakpoints
+    limits = c(0, 3), # Data limits
+    oob = scales::squish, # Handle out-of-bound values
+    na.value = "white", # White background for NA values
+    labels = c("No", "Low", "Medium", "High") # Custom labels for the legend
+  ) +
+  labs(
+    x = "",
+    y = "",
+    fill = "Mean\nexpression" # Update legend label for color
+  ) +
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_blank(), # Remove all borders
+    axis.line.x = element_line(color = "black"), # Keep x-axis line
+    axis.line.y = element_line(color = "black"), # Keep y-axis line
+    axis.ticks.length = unit(0.1, "cm"), # Increase tick length
+    axis.ticks.x = element_line(color = "black"), # Show x-axis ticks
+    axis.ticks.y = element_line(color = "black"), # Show y-axis ticks
+    axis.text.y = element_text(color = y_tick_colors),  # Assign colors to y-axis tick labels
+    axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1, size = fontSize), # Larger x-axis labels
+    axis.ticks.direction = "out", # Ticks face outward
+    legend.position = "right"
+  )
+dev.off()
+
+
+```
+
+# Figure 3b. (must run Figure 3a first to prepare the params.) grid plot showing mean safety score of candidate CARs (4 groups)
+```{r}
+
+total_candidate_CARs = length(candidate_CARs_display)
+
+####### add mean efficacy 
+candidate_CARs_max_expr_df = candidate_CARs_df[c("LogiCARs", "LogiCARs_display", "Efficacy_mean", "Group2")]
+colnames(candidate_CARs_max_expr_df) = c("LogiCARs", "LogiCARs_display", "Efficacy", "Group")
+
+####### calculate max RNA expression across tissues and cell types
+# mean expression in each tissue
+grouped_means <- candidateCARs_equivalent_RNA_Expression_res_df %>%
+  group_by(Tissue_grouped) %>%
+  summarise(across(1:total_candidate_CARs, \(x) mean(x, na.rm = TRUE)))
+# max mean-expression across tissues
+final_col_max <- apply(grouped_means[, -1], 2, max, na.rm = TRUE)
+add_df <- as.data.frame(final_col_max)
+colnames(add_df) = c("RNA (tissue)")
+add_df$LogiCARs_display = rownames(add_df)
+candidate_CARs_max_expr_df = merge(candidate_CARs_max_expr_df, add_df, by = "LogiCARs_display")
+
+# mean expression in each cell type
+grouped_means <- candidateCARs_equivalent_RNA_Expression_res_df %>%
+  group_by(cell_group_custom) %>%
+  summarise(across(1:total_candidate_CARs, \(x) mean(x, na.rm = TRUE)))
+# max mean-expression across tissues
+final_col_max <- apply(grouped_means[, -1], 2, max, na.rm = TRUE)
+add_df <- as.data.frame(final_col_max)
+colnames(add_df) = c("RNA (cell type)")
+add_df$LogiCARs_display = rownames(add_df)
+candidate_CARs_max_expr_df = merge(candidate_CARs_max_expr_df, add_df, by = "LogiCARs_display")
+
+
+####### calculate max Protein expression across tissues and cell types
+# max mean-expression across tissues
+a <- candidateCARs_equivalent_Protein_Expression_res_df_Tissues
+a$Tissue_grouped = NULL
+final_col_max <- apply(a, 2, max, na.rm = TRUE)
+final_col_max <- ifelse(is.infinite(final_col_max) & final_col_max < 0, NA, final_col_max)
+add_df <- as.data.frame(final_col_max)
+colnames(add_df) = c("Protein (tissue)")
+add_df$LogiCARs_display = rownames(add_df)
+candidate_CARs_max_expr_df = merge(candidate_CARs_max_expr_df, add_df, by = "LogiCARs_display")
+
+# mean expression in each cell type
+a <- candidateCARs_equivalent_Protein_Expression_res_df_Cells
+a$Cell_grouped = NULL
+final_col_max <- apply(a, 2, max, na.rm = TRUE)
+final_col_max <- ifelse(is.infinite(final_col_max) & final_col_max < 0, NA, final_col_max)
+add_df <- as.data.frame(final_col_max)
+colnames(add_df) = c("Protein (cell type)")
+add_df$LogiCARs_display = rownames(add_df)
+candidate_CARs_max_expr_df = merge(candidate_CARs_max_expr_df, add_df, by = "LogiCARs_display")
+
+candidate_CARs_max_expr_df[1:5,1:5]
+
+candidate_CARs_max_expr_df <- candidate_CARs_max_expr_df[order(candidate_CARs_max_expr_df$Group, -candidate_CARs_max_expr_df$Efficacy), ]
+
+rownames(candidate_CARs_max_expr_df) = candidate_CARs_max_expr_df$LogiCARs_display
+candidate_CARs_max_expr_df0 <- candidate_CARs_max_expr_df
+candidate_CARs_order = rownames(candidate_CARs_max_expr_df0)
+candidate_CARs_max_expr_df = t(candidate_CARs_max_expr_df0[c("Efficacy", "RNA (tissue)", "RNA (cell type)", "Protein (tissue)", "Protein (cell type)")])
+candidate_CARs_max_expr_df = as.data.frame(candidate_CARs_max_expr_df)
+
+# Prepare data for the plot
+candidate_CARs_max_expr_df$Metric <- rownames(candidate_CARs_max_expr_df) # Add Metric as a column
+plot_data <- candidate_CARs_max_expr_df %>%
+  pivot_longer(
+    cols = -Metric, 
+    names_to = "Gene", 
+    values_to = "Value"
+  ) %>%
+  mutate(Value = as.numeric(Value)) # Ensure all values are numeric
+
+# Separate data for dot plot (first row) and heatmap (rows 2-5)
+dotplot_data <- plot_data %>% filter(Metric == "Efficacy")
+dotplot_data$Gene = factor(dotplot_data$Gene, levels = candidate_CARs_order)
+heatmap_data <- plot_data %>% filter(Metric != "Efficacy")
+heatmap_data$Gene = factor(heatmap_data$Gene, levels = candidate_CARs_order)
+
+# Create the plot
+pdf_file <- paste0(fig_dir, "Figure3b_safety_landscape_RNA_and_Protein.pdf")
+fig_width <- 16
+fig_height <- 3.8
+fontSize <- 10 # Larger font size for axis tick labels
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+
+ggplot() +
+  # Dot plot for Efficacy
+  geom_point(
+    data = dotplot_data,
+    aes(x = Gene, y = Metric, size = Value),
+    color = "black"
+  ) +
+  scale_size_continuous(
+    range = c(1, 5), # Dot size range
+    limits = c(0, 1), # Scale legend from 0 to 1
+    name = "Mean\nefficacy"
+  ) +
+  # Heatmap for rows 2-5
+  geom_tile(
+    data = heatmap_data,
+    aes(x = Gene, y = Metric, fill = Value),
+    width = 1,
+    height = 1
+  ) +
+  # Add X for NA values
+  geom_text(
+    data = heatmap_data %>% filter(is.na(Value)),
+    aes(x = Gene, y = Metric, label = "X"),
+    color = "black",
+    size = 3
+  ) +
+  scale_fill_gradientn(
+    colors = c("#440154", "#31688E", "#35B779", "#FDE725"), # Gradient colors
+    values = scales::rescale(c(0, 1, 2, 3)), # Define color breakpoints
+    limits = c(0, 3), # Data limits
+    oob = scales::squish, # Handle out-of-bound values
+    na.value = "white", # White background for NA values
+    name = "Max\nexpression",
+    labels = c("No", "Low", "Medium", "High") # Custom labels for the legend
+  ) +
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_blank(), # Remove all borders
+    axis.line.x = element_line(color = "black"), # Keep x-axis line
+    axis.line.y = element_line(color = "black"), # Keep y-axis line
+    axis.ticks.length = unit(0.1, "cm"), # Increase tick length
+    axis.ticks.x = element_line(color = "black"), # Show x-axis ticks
+    axis.ticks.y = element_line(color = "black"), # Show y-axis ticks
+    axis.text.y = element_text(color = "black", size = fontSize), # Larger y-axis labels
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = fontSize, color = rev(y_tick_colors)), # Larger x-axis labels
+    axis.ticks.direction = "out", # Ticks face outward
+    legend.position = c(1.05, -0.6),
+    legend.text = element_text(family = "Arial"), # Use a Unicode-compatible font: Arial sans
+    plot.margin = margin(5, 100, 5, 5) # Add space on the right for the legend
+    #legend.position = "right"
+  ) +
+  labs(title = "",
+    x = "",
+    y = "",
+    size = "Efficacy", 
+    fill = "Expression\nlevels")
+
+dev.off()
+
+```
+
+
+
+#test code
+```{r}
+
+
+
+
+```

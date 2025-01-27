@@ -1,0 +1,377 @@
+---
+title: "UMAP visualization of BRCA tumor cells from multiple cohorts and normal tissue cells from HPA"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+library(dplyr)
+library(ggplot2)
+
+library(tidyr)
+library(data.table)
+
+library(purrr)
+
+```
+
+
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+
+my.colors <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
+
+
+```
+
+# Figure 2a. barplot of Time complexity comparison between exhaustive search and LogiCAR Designer
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+surface_genes = 2716
+
+x = c("N = 2", "N = 3", "N = 4", "N = 5")
+x <- factor(x, levels = x)
+y1 = c(choose(surface_genes, 2) *6, choose(surface_genes, 3) *20, choose(surface_genes, 4) *70, choose(surface_genes, 5) *252)
+y2 = 1000*10*c(2*100,4*500,12*800,40*1000) # 2, 4, 12, 40. # 200, 400, 800, and 1000
+baseline = y2[1]
+y1 <- y1/baseline
+y2 <- y2/baseline
+y2[1] <- 1.1*y2[1]  # add a bit to ease display it on the plot
+
+# Create a data frame
+data <- data.frame(
+  x = factor(x),  # Convert x to a factor for discrete x-axis
+  y1 = y1,
+  y2 = y2
+)
+
+# Reshape the data into long format for ggplot
+data_long <- data %>%
+  pivot_longer(cols = c(y1, y2), names_to = "Group", values_to = "Value")
+
+# Define colors for the two groups
+my.colors <- c("y1" = "#0072B2", "y2" = "#E69F00")
+
+# Define custom legend labels
+legend_labels <- c("y1" = "Exhaustive search", "y2" = "LogiCAR designer")
+
+# Create the bar plot
+p <- ggplot(data_long, aes(x = x, y = Value, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +  # Bar plot with grouped bars
+  scale_fill_manual(values = my.colors, labels = legend_labels) +  # Assign custom colors and labels
+  scale_y_log10(
+    breaks = c(1, 1e3, 1e6, 1e9, 1e12, 1e15),
+    labels = trans_format("log10", math_format(10^.x)),  # Scientific notation for y-axis
+    limits = c(1, 1e15)
+  ) +
+  labs(
+    x = "", 
+    y = "Relative time complexity", 
+    title = "",
+    fill = ""  # Legend title
+  ) +
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(color = "black", angle = 45, hjust = 1),  
+    legend.position = "none"  # Legend position (none, right, etc.)
+  )
+
+
+# Print the plot
+print(p)
+
+# Save the plot as a PDF
+ggsave(
+  filename = paste0(fig_dir, "Time_complexity_comparison.pdf"),  # Output file name
+  plot = p,  # Plot object
+  width = 3 * 0.7,  # Width in inches
+  height = 3.5 * 0.7,  # Height in inches
+  device = "pdf"  # Save as PDF
+)
+
+```
+
+# extract max score of LogiCAR Designer in each generation for N genes (N = 2,3,4,5)
+```{r}
+
+Ngene_logiCARs = c("doublets", "triplets", "quadruples", "quintuplets")
+DiffTumorCells_dir = c("safety90/", "GSE246613_Patient16_allTumorCells/", "GSE161529_patient0135_500TumorCells/") #  "15BRCAdatasets_TNBC/", 
+
+############ safety90 (72.4k tumor cells from 15 public datasets)
+#data_dir_temp <- paste0(data_dir, DiffTumorCells_dir[1])
+############ GSE246613_Patient16_allTumorCells (8k tumor cells from In-house 2; Patient: Patient16)
+#data_dir_temp <- paste0(data_dir, DiffTumorCells_dir[2])
+############ GSE161529_patient0135_500TumorCells (0.5k tumor cells from GSE161529; Patient: 0135)
+data_dir_temp <- paste0(data_dir, DiffTumorCells_dir[3])
+
+# Initialize an empty data frame to store results
+result_df <- data.frame(Generation = integer())
+
+# Loop through each Ngene_logiCARs value
+for (i in 1:length(Ngene_logiCARs)) {
+  # List all files matching the pattern
+  file_list <- list.files(
+    path = data_dir_temp,
+    #pattern = paste0("AllDatasets_EachPatient500Cells_optimal_", Ngene_logiCARs[i], "_.*_GAlog.txt"),
+    #pattern = paste0("GSE246613_Patient16_allTumorCells_optimal_", Ngene_logiCARs[i], "_.*_GAlog.txt"),
+    pattern = paste0("GSE161529_patient0135_500TumorCells_optimal_", Ngene_logiCARs[i], "_.*_GAlog.txt"),
+    full.names = TRUE
+  )
+  
+  # Function to read a file and extract the Score column
+  read_file_scores <- function(file) {
+    read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
+      select(Generation, Score)
+  }
+  
+  # Read all files and extract Scores
+  all_scores <- map_dfr(file_list, read_file_scores, .id = "File")
+  
+  # Calculate the maximum score for each generation
+  max_scores <- all_scores %>%
+    group_by(Generation) %>%
+    summarise(Max_Score = max(Score, na.rm = TRUE)) %>%
+    arrange(Generation)
+  
+  # Rename the Max_Score column to the current Ngene_logiCARs value
+  colnames(max_scores)[2] <- Ngene_logiCARs[i]
+  
+  # Merge with result_df, keeping all generations and filling in NA for missing values
+  result_df <- full_join(result_df, max_scores, by = "Generation")
+  
+  # Print the intermediate result
+  print(max_scores)
+}
+
+# Sort the final result_df by Generation
+result_df <- result_df %>% arrange(Generation)
+
+# Print the final result
+print(result_df)
+#write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_74kTumorCells.csv"))
+#write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_8kTumorCells.csv"))
+write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_0.5kTumorCells.csv"))
+
+
+
+
+
+```
+
+
+# Figure 2b. lineplot of convergence speed of LogiCAR Designer
+```{r}
+
+processed_dir = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/"
+fig_dir = paste0(processed_dir, "Figures/")
+result_df = read.csv(file = paste0(processed_dir, "Max_Score_vs_Generation_74kTumorCells.csv"), row.names = 1)
+#result_df = read.csv(file = paste0(processed_dir, "Max_Score_vs_Generation_8kTumorCells.csv"), row.names = 1)
+#result_df = read.csv(file = paste0(processed_dir, "Max_Score_vs_Generation_0.5kTumorCells.csv"), row.names = 1)
+
+max_score_doublets = max(result_df$doublets, na.rm = T)
+
+##### identify the max generation to plot
+# Initialize a vector to store the earliest generations
+earliest_generations <- numeric()
+
+# Loop through each column (excluding Generation)
+for (col in colnames(result_df)[-1]) {
+  # Find the maximum value in the column (ignoring NAs)
+  max_value <- max(result_df[[col]], na.rm = TRUE)
+  
+  # Find the earliest row (Generation) where the maximum value occurs
+  earliest_row <- result_df %>%
+    filter(.data[[col]] == max_value) %>%  # Filter rows where the column equals the max value
+    slice_min(Generation) %>%  # Get the row with the smallest Generation
+    pull(Generation)  # Extract the Generation value
+  
+  # Store the result
+  earliest_generations <- c(earliest_generations, earliest_row)
+}
+
+# Create a data frame to store the results
+earliest_results <- data.frame(
+  Category = colnames(result_df)[-1],  # Column names
+  Generation = earliest_generations  # Earliest generations
+)
+
+# Print the result
+print(earliest_results)
+
+stop_row = 900 # max(earliest_results$Earliest_Generation)
+result_df2 <- result_df[1:stop_row, ]
+
+
+
+########### adapt values so that each column is monotonic
+# Function to enforce non-decreasing values in a column
+make_non_decreasing <- function(column) {
+  for (i in 2:length(column)) {
+    if (is.na(column[i]) || column[i] < column[i - 1]) {
+      column[i] <- column[i - 1]
+    }
+  }
+  return(column)
+}
+
+# Apply the function to each column (except Generation)
+result_df2 <- result_df2 %>%
+  mutate(across(-Generation, make_non_decreasing))
+
+# Print the updated data frame
+print(result_df2)
+
+
+
+# Reshape the data into long format
+result_df2_long <- result_df2 %>%
+  pivot_longer(
+    cols = -Generation,  # Keep Generation as the ID column
+    names_to = "Category",  # Column for the category (doublets, triplets, etc.)
+    values_to = "Score"  # Column for the score values
+  )
+
+# Merge earliest_results with result_df2_long to get the corresponding scores
+earliest_results <- earliest_results %>%
+  left_join(result_df2_long, by = c("Category", "Generation"))
+
+# Ensure the Category column is a factor with the correct levels
+result_df2_long$Category <- factor(result_df2_long$Category, levels = c("doublets", "triplets", "quadruples", "quintuplets"))
+
+# Define colors for the four curves and the dashed line
+my.colors <- c("doublets" = "#0072B2", "triplets" = "#E69F00", "quadruples" = "#009E73", "quintuplets" = "#D55E00", "Exhaustive" = "grey", "Optimum" = "black")
+
+# Define custom legend labels
+legend_labels <- c(
+  "doublets" = "LogiCAR designer (N = 2)", 
+  "triplets" = "LogiCAR designer (N = 3)", 
+  "quadruples" = "LogiCAR designer (N = 4)", 
+  "quintuplets" = "LogiCAR designer (N = 5)", 
+  "Exhaustive" = "Exhaustive search (N = 2)", 
+  "Optimum" = "Optimal solution"
+)
+
+# Create the plot
+p <- ggplot(result_df2_long, aes(x = Generation, y = Score * 100, color = Category)) +
+  geom_line(linewidth = 1) +  # Line plot
+  geom_hline(
+    aes(yintercept = max_score_doublets * 100, color = "Exhaustive"),  # Add dashed line to the legend
+    linetype = "dashed", linewidth = 0.5
+  ) +
+  geom_point(
+    data = earliest_results,  # Add points for the earliest generations
+    aes(x = Generation, y = Score * 100, color = "Optimum"),  # Map to "Optimum" in the legend
+    shape = 17,  # Solid triangle
+    size = 2  # Adjust size as needed
+  ) +
+  scale_color_manual(values = my.colors, labels = legend_labels) +  # Assign custom colors and labels
+  labs(
+    x = "Generation", 
+    y = "Score", 
+    title = "",
+    color = "Legend"  # Legend title
+  ) +
+  #scale_y_continuous(limits = c(40, 70)) +  # Set y-axis range
+  #scale_y_continuous(limits = c(50, 100)) +  # Set y-axis range
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range
+  scale_x_continuous(limits = c(0, stop_row)) +  # Set x-axis range
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(color = "black"),  
+    legend.position = "none"  # none right
+  )
+
+
+# Print the plot
+print(p)
+
+# Save the plot as a PDF
+ggsave(
+  #filename = paste0(fig_dir, "Max_Score_vs_Generation_74kTumorCells.pdf"),  # Output file name
+  filename = paste0(fig_dir, "Max_Score_vs_Generation_8kTumorCells.pdf"),  # Output file name
+  #filename = paste0(fig_dir, "Max_Score_vs_Generation_0.5kTumorCells.pdf"),  # Output file name
+  plot = p,  # Plot object
+  width = 4 * 0.7,  # Width in inches
+  height = 3.5 * 0.7,  # Height in inches
+  device = "pdf"  # Save as PDF
+)
+
+
+
+
+```
+
+
+

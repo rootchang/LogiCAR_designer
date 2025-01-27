@@ -1,0 +1,907 @@
+---
+title: "Evaluate the safety of potential CARs in TME"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+# install.packages("ggnewscale")
+library(ggnewscale)
+library(tibble)
+
+```
+
+# enables R to show special characters like ≤
+```{r}
+
+#install.packages("showtext")
+library(showtext) # this package enables R to show special characters like ≤
+# Add a font and enable `showtext`
+font_add(family = "Arial", regular = "path/to/arial.ttf")  # Replace with the path to your Arial font file
+showtext_auto()
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
+surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+
+# Define custom colors for each group
+group_colors <- c(
+  "LogiCAR (N = 5)" = "#08306b",  # Deep blue
+  "LogiCAR (N = 4)" = "#2171b5",  # Dark blue
+  "LogiCAR (N = 3)" = "#4292c6",  # Medium blue
+  "LogiCAR (N = 2)" = "#6baed6",  # Light blue
+  "LogiCAR (N = 1)" = "#9ecae1",  # Very light blue
+  "Kwon et al." = "#006d2c",      # Deep green
+  "Dannenfelser et al." = "#41ab5d",  # Light green
+  "Clinical (BRCA)" = "#cb181d",  # Deep red
+  "Clinical (other tumors)" = "#fb6a4a"  # Light red (pink)
+)
+
+```
+
+# constants
+```{r}
+
+seurat_files = c(
+                 paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"),
+                 paste0(data_dir,"GSE246613/GSE246613_seu_Tissue.rds"),
+                 paste0(data_dir,"EMTAB8107/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE176078/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortA/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortB/seu_Tissue.rds"),
+                 paste0(data_dir,"Wu_2020_EMBO/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE161529/seu_Tissue.rds"),
+                 paste0(data_dir,"SRP114962/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE140819/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE148673/seu_Tissue_TISCH.rds"),
+                 paste0(data_dir,"GSE150660/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE143423/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE138536/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE118389/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE75688/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE158724/seu_Tissue.rds")
+                 )
+
+dataset_names = c(
+                 "Stefan",
+                 "GSE246613",
+                 "EMTAB8107",
+                 "GSE176078",
+                 "Bassez_CohortA",
+                 "Bassez_CohortB",
+                 "Wu",
+                 "GSE161529",
+                 "SRP114962",
+                 "GSE140819",
+                 "GSE148673",
+                 "GSE150660",
+                 "GSE143423",
+                 "GSE138536",
+                 "GSE118389",
+                 "GSE75688",
+                 "GSE158724"
+                 )
+
+cancerCell_names = list(
+                 "Stefan" = c("Tumor"),
+                 "GSE246613"= c("Tumor"),
+                 "EMTAB8107"= c("Cancer"),
+                 "GSE176078"= c("Cancer Epithelial"),
+                 "Bassez_CohortA"= c("Cancer_cell"),
+                 "Bassez_CohortB"= c("Cancer_cell"),
+                 "Wu"= c("Epithelial_Basal", "Epithelial_Basal_Cycling"),
+                 "GSE161529"= c("Malignant"),
+                 "SRP114962"= c("Malignant"),
+                 "GSE140819"= c("Epithelial cell"),
+                 "GSE148673"= c("Malignant cells"),
+                 "GSE150660"= c("Malignant cells"),
+                 "GSE143423"= c("Malignant cells"),
+                 "GSE138536"= c("Tumor"),
+                 "GSE118389"= c("epithelial"),
+                 "GSE75688"= c("Tumor"),
+                 "GSE158724"= c("Cancer cells")
+                 )
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+```
+
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+# load candidate CARs and logic-gated CARs
+```{r}
+
+###### load candidate CARs and logic-gated CARs
+## local
+candidate_CARs_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+## server
+#candidate_CARs_df = read.csv(paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+
+
+### select N<=3 candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$geneNum <=3, ]
+
+
+### rank first by group2, then by efficacy
+plot_order = rev(c("LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)"))
+candidate_CARs_df$Group2 = factor(candidate_CARs_df$Group2, levels = plot_order)
+candidate_CARs_df$Efficacy_mean = rowMeans(candidate_CARs_df[grepl("Effic", colnames(candidate_CARs_df))])
+candidate_CARs_df <- candidate_CARs_df[order(candidate_CARs_df$Group2, -candidate_CARs_df$Efficacy_mean), ]
+
+candidate_CARs = candidate_CARs_df$LogiCARs
+candidate_CARs_display = candidate_CARs_df$LogiCARs_display
+cleaned_combos <- gsub("[|&()]", "", candidate_CARs)  # Remove |, &, (, )
+cleaned_combos <- gsub("_not", "", cleaned_combos)    # Remove _not
+all_genes <- unlist(strsplit(cleaned_combos, "\\s+"))
+unique_CARtargets_measured <- unique(all_genes)
+
+```
+
+# (run only once!!) load and process expression data to sparse matrix with negated genes
+```{r}
+
+seu_list <- list()
+# Populate seu_list with Seurat objects
+for (fn in seurat_files) {
+  print(paste(fn, "in processing ... "))
+  seu_list[[fn]] <- readRDS(file = fn)
+}
+names(seu_list) <- dataset_names
+
+## deal with GSE246613
+seu_list[["GSE246613"]]$cellType <- seu_list[["GSE246613"]]$celltype_all
+seu_list[["GSE246613"]]$celltype_all = NULL
+# Rename the active assay from "originalexp" to "RNA"
+seu_list[["GSE246613"]][["RNA"]] <- seu_list[["GSE246613"]][["originalexp"]]
+DefaultAssay(seu_list[["GSE246613"]]) <- "RNA"
+seu_list[["GSE246613"]][["originalexp"]] <- NULL
+Assays(seu_list[["GSE246613"]])
+seu_list[["GSE246613"]]@assays$RNA@counts[1:5,1:5]
+seu_list[["GSE246613"]]@assays$RNA@data[1:5,1:5]
+
+## load Stefan non-tumor cells and merge to original tumor cell seurat
+#seu_Stefan_tumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"))
+seu_Stefan_nontumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_nonTumor.rds"))
+colnames(seu_Stefan_nontumor@meta.data)
+seu_Stefan_nontumor$patient_id <- seu_Stefan_nontumor$Multiome_ID
+seu_Stefan_nontumor$subtype <- seu_Stefan_nontumor$Subtype
+seu_Stefan_nontumor$cellType <- as.character(seu_Stefan_nontumor$celltype)
+seu_Stefan_nontumor$Multiome_ID = NULL
+seu_Stefan_nontumor$Subtype = NULL
+seu_Stefan_nontumor$celltype = NULL
+unique(seu_Stefan_nontumor$cellType)
+
+#seu_list[["Stefan"]] <- seu_Stefan_tumor
+#colnames(seu_list[["Stefan"]]@meta.data)
+
+seu_list[["Stefan"]]@assays$RNA@layers[["data"]] <- NULL
+seu_list[["Stefan"]]@assays$RNA@layers[["scale.data"]] <- NULL
+seu_list[["Stefan"]][["pca"]] <- NULL
+seu_list[["Stefan"]][["umap"]] <- NULL
+unique(seu_list[["Stefan"]]$patient_id)
+unique(seu_list[["Stefan"]]$cellType)
+
+seu_Stefan <- merge(seu_list[["Stefan"]], y = seu_Stefan_nontumor)
+seu_Stefan <- JoinLayers(seu_Stefan)
+seu_Stefan
+
+colnames(seu_Stefan@meta.data)
+unique(seu_Stefan$patient_id)
+unique(seu_Stefan$subtype)
+unique(seu_Stefan$cellType)
+seu_list[["Stefan"]] <- seu_Stefan
+rm(seu_Stefan, seu_Stefan_nontumor, seu_Stefan_tumor)
+gc()
+
+colnames(seu_list[[1]]@meta.data)
+#unique(seu_list[[1]]$patientID)
+
+# add dataset info to meta data
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  seu_list[[fn]]$dataset = fn
+  #seu_list_sub[[fn]]
+}
+
+# unify patientID and BRCAsubtype
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  print(colnames(seu_list[[fn]]@meta.data))
+}
+datasets_grouped1 = c("Stefan", "EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "GSE158724")
+#datasets_grouped1 = c("EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "GSE158724")
+datasets_grouped2 = c("GSE246613")
+for (dataset_temp in datasets_grouped1) {
+  patient_id_str = "patient_id" #  GSE246613: PatientID; others: patient_id
+  BRCA_subtype_str = "subtype" #  GSE246613: BRCA_subtype; others: subtype
+  #unique(seu_list[[dataset_temp]][[patient_id_str]])
+  #unique(seu_list[[dataset_temp]][[patient_id_str]][, 1])
+  #unique(seu_list[[dataset_temp]][[BRCA_subtype_str]][, 1])
+  # Direct renaming using colnames
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == patient_id_str
+  ] <- "patientID"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == BRCA_subtype_str
+  ] <- "BRCAsubtype"
+}
+for (dataset_temp in datasets_grouped2) {
+  patient_id_str = "PatientID" 
+  BRCA_subtype_str = "BRCA_subtype"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == patient_id_str
+  ] <- "patientID"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == BRCA_subtype_str
+  ] <- "BRCAsubtype"
+}
+
+# check cell types
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  print(unique(seu_list[[fn]]$cellType))
+}
+
+
+all_genes = c()
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  all_genes = c(all_genes, rownames(seu_list[[fn]]))
+}
+all_genes = unique(all_genes)
+length(all_genes) # 74546 (all 17 datasets); 68688 (15 public datasets)
+
+# Get all gene names (using map_genes_to_hgnc() function in util2.Rmd)
+gene_mapping0 <- map_genes_to_hgnc(all_genes)
+length(gene_mapping0$input_gene) # 74545
+length(unique(gene_mapping0$input_gene)) # 74545
+#gene_mapping0 = gene_mapping0[!duplicated(gene_mapping0$input_gene), ]
+
+## get 19352 protein_coding_genes from "util2.Rmd" (also from paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub.csv"))
+protein_coding_genes = read.csv(paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), header = T)
+protein_coding_genes <- protein_coding_genes$x
+# gene_mapping_proteinCoding <- map_genes_to_hgnc(protein_coding_genes)
+# length(gene_mapping_proteinCoding$input_gene) # 19352
+# length(unique(gene_mapping_proteinCoding$input_gene)) # 19352
+# length(unique(gene_mapping_proteinCoding$updated_gene)) # 19352
+# gene_mapping_proteinCoding[gene_mapping_proteinCoding$input_gene != gene_mapping_proteinCoding$updated_gene,]
+# write.csv(gene_mapping_proteinCoding$updated_gene, paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), row.names = F, quote = F)
+
+keep_genes <- protein_coding_genes
+keep_genes_oldName = gene_mapping0$input_gene[gene_mapping0$updated_gene %in% keep_genes]
+length(keep_genes) # 19352
+length(keep_genes_oldName) # 20538 / 20470
+length(unique(keep_genes_oldName)) # 20538 / 20470
+
+gene_mapping0_filtered = gene_mapping0[gene_mapping0$input_gene %in% keep_genes_oldName, ]
+# filter seurat objects by genes
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  gene_names_temp <- rownames(seu_list[[fn]])
+  meta_data <- seu_list[[fn]]@meta.data[c("patientID", "BRCAsubtype", "cellType", "dataset")]
+  keep_genes_temp <- gene_names_temp[gene_names_temp %in% keep_genes_oldName]
+  matched_indices <- match(keep_genes_temp, gene_mapping0_filtered$input_gene)
+  gene_newNames_temp <- gene_mapping0_filtered$updated_gene[matched_indices]
+  # Remove duplicates
+  non_dup_idx <- !duplicated(gene_newNames_temp)
+  keep_genes_temp <- keep_genes_temp[non_dup_idx]
+  matched_indices <- match(keep_genes_temp, gene_mapping0_filtered$input_gene)
+  gene_newNames_temp <- gene_mapping0_filtered$updated_gene[matched_indices]
+  if ("layers" %in% slotNames(seu_list[[fn]]@assays$RNA)){
+    count_matrix <- seu_list[[fn]]@assays$RNA@layers$counts
+  }else{ # GSE246613
+    count_matrix <- seu_list[[fn]]@assays$RNA@counts
+  }
+  rownames(count_matrix) <- rownames(seu_list[[fn]])
+  count_matrix <- count_matrix[keep_genes_temp, , drop = FALSE]
+  rownames(count_matrix) <- gene_newNames_temp
+  colnames(count_matrix) <- rownames(meta_data)
+  new_seurat <- CreateSeuratObject(counts = count_matrix)
+  # add meta_data
+  dim(new_seurat)
+  dim(meta_data)
+  new_seurat@meta.data <- meta_data
+  seu_list[[fn]] <- new_seurat
+}
+
+# Check dimension, normalization status,  print max counts, and make @assays$RNA@layers$data
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  # Print Seurat object summary
+  print(seu_list[[fn]])
+  # Extract count matrix
+  count_matrix <- seu_list[[fn]]@assays$RNA@layers$counts
+  # Print max count value
+  max_count <- max(count_matrix)
+  print(paste("Max count value:", max_count))
+  # Conditional normalization
+  if (max_count > 50) {
+    print("Normalizing data...")
+    normalized_seurat <- NormalizeData(seu_list[[fn]], normalization.method = "LogNormalize", scale.factor = 10000)
+    seu_list[[fn]] <- normalized_seurat
+  } else {
+    print("Data appears already normalized. Setting @data equal to @counts.")
+    seu_list[[fn]]@assays$RNA@layers$data <- seu_list[[fn]]@assays$RNA@layers$counts
+  }
+}
+
+
+
+final_matrix_list = list()
+tumor_cellNum_vec = c()
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  data_matrix <- seu_list[[fn]]@assays$RNA@layers$data
+  rownames(data_matrix) <- rownames(seu_list[[fn]])
+  colnames(data_matrix) <- colnames(seu_list[[fn]])
+  # Modify cellTypes metadata to categorize Tumor and non-Tumor cells
+  cellTypes <- seu_list[[fn]]@meta.data$cellType
+  cellTypes[seu_list[[fn]]@meta.data$cellType %in% cancerCell_names[[fn]]] <- "Tumor"
+  # Get the indices of Tumor and non-Tumor cells
+  tumor_indices <- which(cellTypes == "Tumor")
+  tumor_cellNum_vec <- c(tumor_cellNum_vec, length(tumor_indices))
+  non_tumor_indices <- which(cellTypes != "Tumor")
+  # Combine indices to rearrange data_matrix
+  reordered_indices <- c(tumor_indices, non_tumor_indices)
+  # Rearrange data_matrix columns based on the reordered indices
+  data_matrix <- data_matrix[, reordered_indices]
+  
+  # Find rows that are missing
+  missing_rows <- setdiff(unique_CARtargets_measured, rownames(data_matrix))
+  # Add missing rows with zeros if any are missing
+  if (length(missing_rows) > 0) {
+    # Create a zero matrix for missing rows
+    zero_matrix <- matrix(0, nrow = length(missing_rows), ncol = ncol(data_matrix),
+                          dimnames = list(missing_rows, colnames(data_matrix)))
+    # Combine original and zero matrices
+    data_matrix <- rbind(data_matrix, zero_matrix)
+  }
+  # Subset data matrix to ensure it contains only unique_CARtargets_measured rows
+  data_matrix_onlyData <- data_matrix[unique_CARtargets_measured, , drop = FALSE]
+  data_matrix_onlyData <- t(data_matrix_onlyData)
+  
+  # Calculate the column-wise maximums
+  colMax <- apply(data_matrix_onlyData, 2, max, na.rm = TRUE)
+  # Subtract the original matrix values from the column-wise maximums
+  data_matrix_onlyData_negated <- sweep(data_matrix_onlyData, 2, colMax, FUN = function(x, y) y - x)
+  colnames(data_matrix_onlyData_negated) = paste0(colnames(data_matrix_onlyData_negated), "_not")
+  
+  final_matrix <- cbind(data_matrix_onlyData, data_matrix_onlyData_negated)
+  dim(final_matrix)
+  final_matrix[1:5,1:5]
+  ## convert - in gene names to _
+  colnames(final_matrix) = gsub("-", "_", colnames(final_matrix))
+  
+  final_matrix_list[[fn]] <- final_matrix
+}
+
+
+
+
+
+
+
+
+candidateCARs_equivalent_RNA_Expression_list <- list()
+
+for (data_i in 1:length(seu_list)) {
+  fn <- names(seu_list)[data_i]
+  print(paste("**************", fn, "**************"))
+  temp_res_list <- calcEquivalentExpression2(candidate_CARs, final_matrix_list[[fn]]) 
+  ### Convert the list to a data frame
+  candidateCARs_equivalent_RNA_Expression_res_df <- as.data.frame(temp_res_list)
+  colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- names(temp_res_list)
+  candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_res_df[candidate_CARs]
+  colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- candidate_CARs_display
+  
+  candidateCARs_equivalent_RNA_Expression_res_df$CellType = "Non-tumor"
+  candidateCARs_equivalent_RNA_Expression_res_df$CellType[1:tumor_cellNum_vec[data_i]] = "Tumor"
+  
+  candidateCARs_equivalent_RNA_Expression_list[[fn]] <- candidateCARs_equivalent_RNA_Expression_res_df
+}
+
+
+#### Save final_matrix_list
+# saveRDS(final_matrix_list, "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_vs_nonTumor_expr_final_matrix_list.RDS")
+#### Save tumor_cellNum_vec
+# saveRDS(tumor_cellNum_vec, "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_cellNum_vec.RDS")
+#### Save candidateCARs_equivalent_RNA_Expression_list
+# saveRDS(candidateCARs_equivalent_RNA_Expression_list, "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_vs_nonTumor_candidateCARs_equivalent_RNA_Expression_list.RDS")
+
+
+
+```
+
+# load expr. patterns
+```{r}
+
+#### Load final_matrix_list
+# final_matrix_list <- readRDS("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_vs_nonTumor_expr_final_matrix_list.RDS")
+#### Load tumor_cellNum_vec
+tumor_cellNum_vec <- readRDS("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_cellNum_vec.RDS")
+#### Load candidateCARs_equivalent_RNA_Expression_list
+candidateCARs_equivalent_RNA_Expression_list <- readRDS("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/17datasets_tumor_vs_nonTumor_candidateCARs_equivalent_RNA_Expression_list.RDS")
+
+```
+
+
+# Figure 3B. FoldChange in 16 datasets of all CAR targets
+```{r}
+
+# Define constants
+CAR_num <- 86
+datasets_num <- 16
+
+# Initialize FoldChange_df and pval_df with datasets as rows and CARs as columns
+FoldChange_df <- data.frame(matrix(nrow = datasets_num, ncol = CAR_num))
+colnames(FoldChange_df) <- colnames(candidateCARs_equivalent_RNA_Expression_list[[1]])[1:CAR_num]
+rownames(FoldChange_df) <- names(seu_list)[1:datasets_num]
+
+pval_df <- data.frame(matrix(nrow = datasets_num, ncol = CAR_num))
+colnames(pval_df) <- colnames(candidateCARs_equivalent_RNA_Expression_list[[1]])[1:CAR_num]
+rownames(pval_df) <- names(seu_list)[1:datasets_num]
+
+# Iterate through datasets
+for (fn in names(seu_list)[1:datasets_num]) {
+  print(paste("**************", fn, "**************"))
+  # Get the current dataset
+  candidateCARs_equivalent_RNA_Expression_res_df <- candidateCARs_equivalent_RNA_Expression_list[[fn]]
+  # Check if "Non-tumor" cell type exists in the dataset
+  if (!("Non-tumor" %in% unique(candidateCARs_equivalent_RNA_Expression_res_df$CellType))) {
+    next  # Skip to the next dataset if "Non-tumor" is missing
+  }
+  # Subset Tumor and Non-tumor expression data
+  tumor_expr <- candidateCARs_equivalent_RNA_Expression_res_df[candidateCARs_equivalent_RNA_Expression_res_df$CellType == "Tumor", 1:CAR_num, drop = FALSE]
+  nontumor_expr <- candidateCARs_equivalent_RNA_Expression_res_df[candidateCARs_equivalent_RNA_Expression_res_df$CellType == "Non-tumor", 1:CAR_num, drop = FALSE]
+  # Calculate mean expression for Tumor and Non-tumor cells
+  tumor_expr_mean <- colMeans(tumor_expr, na.rm = TRUE)
+  nontumor_expr_mean <- colMeans(nontumor_expr, na.rm = TRUE)
+  # Handle division by zero: if both Tumor and Non-tumor expression are 0, set fold change to 1
+  FoldChange_vec <- ifelse(tumor_expr_mean == 0 & nontumor_expr_mean == 0, 1, tumor_expr_mean / nontumor_expr_mean)
+  # Assign the fold change vector to the corresponding row in FoldChange_df
+  FoldChange_df[fn, ] <- FoldChange_vec
+  # Calculate p-values using Wilcoxon Rank-Sum Test for each CAR
+  pval_vec <- sapply(1:CAR_num, function(i) {
+    #wilcox.test(tumor_expr[, i], nontumor_expr[, i], exact = FALSE)$p.value
+    if (sum(tumor_expr[, i])==0 & sum(nontumor_expr[, i])==0){
+      1
+    }else{
+      t.test(tumor_expr[, i], nontumor_expr[, i])$p.value
+    }
+  })
+  adjusted_pvals_bonferroni <- p.adjust(pval_vec, method = "bonferroni")
+  # Assign the p-value vector to the corresponding row in pval_df
+  pval_df[fn, ] <- adjusted_pvals_bonferroni
+}
+### set small pval to e-300
+pval_df[pval_df < 1e-300] <- 1e-300
+
+
+
+
+# Prepare data
+plot_data <- FoldChange_df %>%
+  pivot_longer(cols = everything(), names_to = "Gene", values_to = "FoldChange") %>%
+  mutate(
+    PValue = as.vector(as.matrix(pval_df)),
+    NegLogPValue = -log10(PValue)
+  )
+plot_data$Dataset <- rep(names(seu_list)[1:datasets_num], each = CAR_num)
+upper_FC <- quantile(plot_data$FoldChange, 0.95)
+lower_FC <- quantile(plot_data$FoldChange, 0.05)
+plot_data$FoldChange[plot_data$FoldChange > upper_FC] = upper_FC
+plot_data$FoldChange[plot_data$FoldChange < lower_FC] = lower_FC
+plot_data$LogFoldChange <- log(plot_data$FoldChange)
+
+plot_data$Dataset[plot_data$Dataset == "Stefan"] <- "In-house 1"
+plot_data$Dataset[plot_data$Dataset == "GSE246613"] <- "In-house 2"
+plot_data$Dataset <- factor(plot_data$Dataset, levels = rev(c("EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "In-house 1", "In-house 2")))
+plot_data$Gene<- factor(plot_data$Gene, levels = colnames(FoldChange_df))
+
+# PDF settings
+pdf_file   <- file.path(fig_dir, paste0("Figure3b_safety_landscape_TME.pdf"))
+fig_width  <- 12
+fig_height <- 4
+fontSize   <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+# Create the dot plot
+p <- ggplot(plot_data, aes(x = Gene, y = Dataset)) +  # Use Dataset for y-axis
+  geom_point(
+    aes(
+      size = NegLogPValue, 
+      fill = LogFoldChange  # Use fill for the gradient color
+    ), 
+    shape = 21,
+    color = "grey50",  # Edge color of the dots
+    stroke = 0.3  # Edge thickness
+  ) +
+  # Add asterisks for FoldChange > 2
+  geom_text(
+    data = subset(plot_data, FoldChange > 2),  # Filter data for FoldChange > 2
+    aes(label = "*"),  # Add asterisk
+    size = 3,  # Size of the asterisk
+    color = "black",  # Color of the asterisk
+    vjust = 0.6,  # Vertical alignment (center)
+    hjust = 0.5  # Horizontal alignment (center)
+  ) +
+  scale_fill_gradient2(
+    low = "blue", 
+    mid = "white", 
+    high = "red", 
+    oob = scales::squish,  # Squish out-of-bounds values to the extreme colors
+    midpoint = 0,  # Midpoint at fold change = 1
+    limits = c(-2, 2)  # Set the range from 0 to 10
+  ) +
+  scale_size_continuous(range = c(1, 3)) +
+  labs(
+    x = "CARs", 
+    y = "Datasets",
+    size = "-Log10(p-value)",
+    fill = "Log(Fold Change)"  # Legend title for fill
+  ) +
+  theme(
+    panel.grid        = element_blank(),
+    panel.background  = element_rect(fill = "white"),
+    axis.line.y       = element_line(color = "black"),
+    axis.line.x       = element_line(color = "black"),
+    axis.ticks.y      = element_line(color = "black"),
+    axis.ticks.x      = element_line(color = "black"),
+    panel.border      = element_blank(),
+    axis.text.y       = element_text(color = "black"),  # Use y_tick_colors if defined
+    axis.text.x       = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),
+    legend.position   = c(1.08, 0.2), # "right"
+    plot.margin = margin(r = 100)  # Add 50 units of space to the right margin
+  )
+
+# Print the plot
+print(p)
+# Close the PDF device
+dev.off()
+
+
+```
+
+
+# Sigure *. plot the dotplot betweeen tumor vs non-tumor cells
+```{r}
+
+
+
+
+
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_list[[fn]]
+  # Gather the data into long format
+  genes <- rev(candidate_CARs_display)
+  dotplot_data <- candidateCARs_equivalent_RNA_Expression_res_df %>%
+    pivot_longer(
+      cols = all_of(genes),
+      names_to = "Gene",
+      values_to = "Expression"
+    )
+  
+  Non_tumor_exist = "Non-tumor" %in% unique(dotplot_data$CellType)
+  
+  if (Non_tumor_exist) {
+    ################## plot  RNA expression dotplot tumor vs non-tumor cells ################## 
+    # Calculate required metrics: zero ratio and mean expression for each CellType-Gene combination
+    plot_data <- dotplot_data %>%
+      group_by(CellType, Gene) %>%
+      summarise(
+        ExprRatio      = mean(Expression > 0, na.rm = TRUE),
+        MeanExpression = mean(Expression, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        CellType = factor(CellType, levels = c("Tumor", "Non-tumor")),
+        Gene     = factor(Gene,     levels = genes)
+      )
+    
+    #------------------------------
+    # 1) Compute fold change for each Gene: (Tumor / Non-tumor)
+    #    - if both mean expressions = 0, define 0/0 = 1
+    #    - cap any fold change > 5 at 5 (also covers Inf)
+    #------------------------------
+    
+    # Pivot the mean expressions to wide to compare Tumor vs Non-tumor side by side
+    fold_data <- plot_data %>%
+      dplyr::select(Gene, CellType, MeanExpression) %>%
+      pivot_wider(
+        names_from  = CellType,
+        values_from = MeanExpression
+      ) %>%
+      mutate(
+        # Tumor / Non-tumor
+        foldChange = ifelse(
+          is.na(Tumor / `Non-tumor`),  # covers 0/0 and NA
+          1,                           # define 0/0 (or NA) as foldChange = 1
+          Tumor / `Non-tumor`
+        ),
+        foldChange = ifelse(is.infinite(foldChange), 5, foldChange), # inf -> 5
+        foldChange = pmin(foldChange, 5)                             # cap at 5
+      ) %>%
+      dplyr::select(Gene, foldChange) %>%
+      # Add a "CellType" = "FoldChange" so this can appear as a third column
+      mutate(CellType = "FoldChange")
+    
+    # Combine the original plot_data (for Tumor & Non-tumor) with the fold_data (for FoldChange)
+    # So we end up with 3 "CellType" levels: "Tumor", "Non-tumor", "FoldChange"
+    combined_data <- bind_rows(
+      plot_data,
+      fold_data
+    ) %>%
+      # Re-factor the CellType to have the order: Tumor, Non-tumor, FoldChange
+      mutate(
+        CellType = factor(CellType, levels = c("Tumor", "Non-tumor", "FoldChange"))
+      )
+    
+    # Define a vector of colors for y-axis tick labels (as you had in your code)
+    group_sizes     <- rev(as.numeric(table(candidate_CARs_df$Group2)))
+    group_names     <- rev(names(table(candidate_CARs_df$Group2)))
+    y_tick_colors   <- rep(group_colors[group_names], times = group_sizes)
+    
+    # PDF settings
+    pdf_file   <- file.path(fig_dir, paste0("Figure3b_safety_landscape_TME_", fn, ".pdf"))
+    fig_width  <- 4
+    fig_height <- 12.5
+    fontSize   <- 1.2
+    
+    pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+    
+    #------------------------------
+    # 2) Plot:
+    #    - First geom_point() for Tumor & Non-tumor
+    #       (size = ExprRatio, color = MeanExpression)
+    #    - Then use ggnewscale::new_scale("size") so we can have a second size legend for foldChange.
+    #    - Second geom_point() for "FoldChange" squares
+    #       (size = foldChange, shape=22, a separate legend)
+    #------------------------------
+    
+    p <- ggplot(combined_data, aes(x = CellType, y = Gene)) +
+      # ---- first geometry: circles for Tumor and Non-tumor cells ----
+      geom_point(
+        data = subset(combined_data, CellType %in% c("Tumor","Non-tumor")),
+        aes(size = ExprRatio, color = MeanExpression),
+        shape = 16  # circle
+      ) +
+      scale_color_gradientn(
+        colors  = c("#440154", "#31688E", "#35B779", "#FDE725"),
+        values  = scales::rescale(c(0, 1, 2, 3)),
+        limits  = c(0, 3),
+        oob     = scales::squish,
+        labels  = c("No", "Low", "Medium", "High"),
+        name    = "Mean\nexpression"
+      ) +
+      scale_size_continuous(
+        range  = c(1, 5),
+        limits = c(0, 1),
+        name   = "Expressed\nratio"
+      ) +
+      
+      ggnewscale::new_scale("size") +
+      
+      # ---- second geometry: squares for FoldChange ----
+      geom_point(
+        data = subset(combined_data, CellType == "FoldChange"),
+        aes(size = foldChange, fill = cut(foldChange, breaks = c(-Inf, 1.5, 5), labels = c("grey", "white"))),
+        shape = 22
+      ) +
+      # Add asterisks for foldChange > 2
+      geom_text(
+        data = subset(fold_data, foldChange > 2),
+        aes(label = "*"),
+        size = 4,  # Adjust size as needed
+        color = "red",
+        vjust = 0.5,
+        hjust = 0.5,
+        fontface = "bold"
+      ) +
+      scale_size_continuous(
+        range  = c(0, 5),
+        limits = c(0, 5),
+        breaks = c(0, 0.25, 0.5, 1, 2, 4),
+        name   = "FoldChange"
+      ) +
+      scale_fill_manual(
+        values = c("grey" = "grey50", "white" = "white"),
+        name   = "FoldChange"
+      ) +
+      
+      labs(x = "", y = "") +
+      theme(
+        panel.grid        = element_blank(),
+        panel.background  = element_rect(fill = "white"),
+        axis.line.y       = element_line(color = "black"),
+        axis.line.x       = element_line(color = "black"),
+        axis.ticks.y      = element_line(color = "black"),
+        axis.ticks.x      = element_line(color = "black"),
+        panel.border      = element_blank(),
+        axis.text.y       = element_text(color = y_tick_colors),
+        axis.text.x       = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),
+        legend.position   = "right"
+      )
+  }else{
+    ################## plot  RNA expression dotplot tumor vs non-tumor cells ################## 
+    # Calculate required metrics: zero ratio and mean expression for each Tissue-Gene combination
+    plot_data <- dotplot_data %>%
+      group_by(CellType, Gene) %>%
+      summarise(
+        ExprRatio = mean(Expression > 0, na.rm = TRUE), # Proportion of zeros
+        MeanExpression = mean(Expression, na.rm = TRUE), # Average expression
+        .groups = "drop"
+      )
+    
+    
+    plot_data <- plot_data %>%
+      mutate(
+        CellType = factor(CellType, levels = c("Tumor", "Non-tumor")),
+        Gene = factor(Gene, levels = genes) # Keep genes in column order
+      )
+    
+    # Define a vector of colors for y-axis tick labels
+    group_sizes <- rev(as.numeric(table(candidate_CARs_df$Group2)))
+    group_names <- rev(names(table(candidate_CARs_df$Group2)))
+    y_tick_colors <- rep(group_colors[group_names], times = group_sizes)
+    
+    # Create the plot
+    pdf_file <- paste0(fig_dir,paste0("Figure3b_safety_landscape_TME_",fn,".pdf"))
+    fig_width = 3.6
+    fig_height = 12.5
+    fontSize = 1.2
+    # Open PDF device
+    pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+    # Create the plot and explicitly print it
+    p <- ggplot(plot_data, aes(x = CellType, y = Gene)) +
+        geom_point(aes(size = ExprRatio, color = MeanExpression)) +
+        scale_color_gradientn(
+          colors = c("#440154", "#31688E", "#35B779", "#FDE725"),
+          values = scales::rescale(c(0, 1, 2, 3)),
+          limits = c(0, 3),
+          oob = scales::squish,
+          labels = c("No", "Low", "Medium", "High")
+        ) +
+        scale_size_continuous(
+          range = c(1, 5),
+          limits = c(0, 1)
+        ) +
+        labs(
+          x = "",
+          y = "",
+          size = "Expressed\nratio",
+          color = "Mean\nexpression"
+        ) +
+        theme(
+          panel.grid = element_blank(),
+          panel.background = element_rect(fill = "white"),
+          axis.line.y = element_line(color = "black"),
+          axis.line.x = element_line(color = "black"),
+          axis.ticks.y = element_line(color = "black"),
+          axis.ticks.x = element_line(color = "black"),
+          panel.border = element_blank(),
+          axis.text.y = element_text(color = y_tick_colors),
+          axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "right"
+        )
+  }
+  print(p)
+  # Close the PDF device
+  dev.off()
+}
+
+
+
+```
+
+
+

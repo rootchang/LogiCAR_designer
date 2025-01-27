@@ -1,0 +1,444 @@
+---
+title: "Comparison of the RNA and protein expression levels in BRCA vs other cancer cell lines in DEPMAP"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+# install.packages("ggnewscale")
+library(ggnewscale)
+library(tibble)
+
+```
+
+# enables R to show special characters like ≤
+```{r}
+
+#install.packages("showtext")
+library(showtext) # this package enables R to show special characters like ≤
+# Add a font and enable `showtext`
+font_add(family = "Arial", regular = "path/to/arial.ttf")  # Replace with the path to your Arial font file
+showtext_auto()
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/DepMap/')
+processed_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+
+my.colors <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
+
+
+```
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+# run util2.Rmd "# Find and update gene names using the mygene package function map_genes_to_hgnc()"
+
+# (run for once only!!) load raw RNA and protein expression data and make standard expression matrix
+```{r}
+
+### RNA expression matrix
+RNA_data <- read.csv(file = "//Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/rnaseq_all_20220624/rnaseq_tpm_20220624.csv", check.names = F)
+RNA_data[1:5,1:5]
+cellLineNames <- colnames(RNA_data)[2:ncol(RNA_data)]
+geneNames_raw <- RNA_data[5:nrow(RNA_data),2]
+gene_mapping0 <- map_genes_to_hgnc(geneNames_raw)
+original_gene_order <- match(geneNames_raw, gene_mapping0$input_gene)
+geneNames_updated <- gene_mapping0$updated_gene[original_gene_order]
+sum(gene_mapping0$input_gene != gene_mapping0$updated_gene)
+
+RNA_expr_df = RNA_data[5:nrow(RNA_data),3:ncol(RNA_data)]
+RNA_expr_df <- data.frame(lapply(RNA_expr_df, as.numeric))
+
+RNA_expr_df$geneNA = geneNames_updated
+RNA_expr_df = RNA_expr_df[!duplicated(RNA_expr_df$geneNA),]
+rownames(RNA_expr_df) = RNA_expr_df$geneNA
+RNA_expr_df$geneNA = NULL
+
+max(RNA_expr_df, na.rm=T) # 668099
+min(RNA_expr_df, na.rm=T) # 0
+
+RNA_expr_df_log1p = log1p(RNA_expr_df)  # row: genes, col: cell lines
+max(RNA_expr_df_log1p, na.rm=T) # 13.41219
+min(RNA_expr_df_log1p, na.rm=T) # 0
+
+
+### protein expression matrix
+protein_data = read.csv(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/Proteomics_20221214/Protein_matrix_averaged_20221214.tsv", sep = "\t")
+
+proteinNames_raw <- as.character(protein_data[1, 3:ncol(protein_data)])
+cellLineNames = protein_data[3:nrow(protein_data),2]
+
+gene_mapping0 <- map_genes_to_hgnc(proteinNames_raw)
+original_gene_order <- match(proteinNames_raw, gene_mapping0$input_gene)
+proteinNames_updated <- gene_mapping0$updated_gene[original_gene_order]
+sum(gene_mapping0$input_gene != gene_mapping0$updated_gene)
+
+ProteinExpr_df = protein_data[3:nrow(protein_data),3:ncol(protein_data)]
+ProteinExpr_df <- data.frame(lapply(ProteinExpr_df, as.numeric))
+
+rownames(ProteinExpr_df) <- cellLineNames
+colnames(ProteinExpr_df) <- proteinNames_updated
+
+max(ProteinExpr_df, na.rm=T) # 15.6527
+min(ProteinExpr_df, na.rm=T) # -5.44459
+
+
+
+colnames(ProteinExpr_df) = colNA[3:length(colNA)]
+rownames(ProteinExpr_df) = rowNA[3:length(rowNA)]
+
+max(ProteinExpr_df, na.rm=T)
+min(ProteinExpr_df, na.rm=T)
+
+Protein_expr_df_log1p = log1p(2^ProteinExpr_df)
+Protein_expr_df_log1p <- t(Protein_expr_df_log1p) # row: genes, col: cell lines
+
+max(Protein_expr_df_log1p, na.rm=T) # 10.84964
+min(Protein_expr_df_log1p, na.rm=T) # 0.02270262
+
+
+
+# model ID to cancer type mapping
+model_cancer_df = read.csv(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/model_list_20240110.csv")
+model_cancer_df = model_cancer_df[c("model_id", "cancer_type")]
+
+BRCA_models = model_cancer_df$model_id[model_cancer_df$cancer_type=="Breast Carcinoma"]
+
+### re-order RNA_expr_df_log1p and Protein_expr_df_log1p columns by putting BRCA models before other cancers
+BRCA_cols_RNA <- colnames(RNA_expr_df_log1p) %in% BRCA_models
+RNA_breakpoint <- sum(BRCA_cols_RNA) # 61
+nonBRCA_cols_RNA <- !BRCA_cols_RNA
+BRCA_cols_protein <- colnames(Protein_expr_df_log1p) %in% BRCA_models
+protein_breakpoint <- sum(BRCA_cols_protein) # 50
+nonBRCA_cols_protein <- !BRCA_cols_protein
+
+RNA_expr_df_log1p <- RNA_expr_df_log1p[, c(which(BRCA_cols_RNA), which(nonBRCA_cols_RNA))]
+Protein_expr_df_log1p <- Protein_expr_df_log1p[, c(which(BRCA_cols_protein), which(nonBRCA_cols_protein))]
+
+saveRDS(RNA_expr_df_log1p, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/rnaseq_all_20220624/RNA_expr_df_log1p.RDS")
+saveRDS(Protein_expr_df_log1p, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/Proteomics_20221214/Protein_expr_df_log1p.RDS")
+
+```
+
+
+# load candidate CARs and logic-gated CARs
+```{r}
+
+###### load candidate CARs and logic-gated CARs
+## local
+candidate_CARs_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+## server
+#candidate_CARs_df = read.csv(paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+
+
+### select N<=3 candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$geneNum <=3, ]
+
+### select safety > 90% candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$Safety > 0.9, ]
+
+
+### rank first by group2, then by efficacy
+plot_order = rev(c("LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)"))
+candidate_CARs_df$Group2 = factor(candidate_CARs_df$Group2, levels = plot_order)
+candidate_CARs_df$Efficacy_mean = rowMeans(candidate_CARs_df[grepl("Effic", colnames(candidate_CARs_df))])
+candidate_CARs_df <- candidate_CARs_df[order(candidate_CARs_df$Group2, -candidate_CARs_df$Efficacy_mean), ]
+
+candidate_CARs = candidate_CARs_df$LogiCARs
+candidate_CARs_display = candidate_CARs_df$LogiCARs_display
+cleaned_combos <- gsub("[|&()]", "", candidate_CARs)  # Remove |, &, (, )
+cleaned_combos <- gsub("_not", "", cleaned_combos)    # Remove _not
+all_genes <- unlist(strsplit(cleaned_combos, "\\s+"))
+unique_CARtargets_measured <- unique(all_genes)
+
+```
+
+# load processed expression matrix and make sparse matrix
+```{r}
+
+### load processed expression matrix 
+RNA_expr_df_log1p <- readRDS(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/rnaseq_all_20220624/RNA_expr_df_log1p.RDS")
+Protein_expr_df_log1p <- readRDS(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/RNA_proteomics/DepMap/Proteomics_20221214/Protein_expr_df_log1p.RDS")
+
+
+RNA_expr_df_log1p = RNA_expr_df_log1p[unique_CARtargets_measured, , drop = F]
+# Rows not present will be filled with NA
+Protein_expr_df_log1p <- Protein_expr_df_log1p[
+  match(unique_CARtargets_measured, rownames(Protein_expr_df_log1p)),
+  , drop = FALSE
+]
+rownames(Protein_expr_df_log1p) <- unique_CARtargets_measured
+
+
+RNA_expr_Smat <- Matrix(as.matrix(RNA_expr_df_log1p), sparse = TRUE)
+RNA_expr_Smat <- t(RNA_expr_Smat)
+# Calculate the column-wise maximums
+colMax <- apply(RNA_expr_Smat, 2, max, na.rm = TRUE)
+# Subtract the original matrix values from the column-wise maximums
+RNA_expr_Smat_negated <- sweep(RNA_expr_Smat, 2, colMax, FUN = function(x, y) y - x)
+colnames(RNA_expr_Smat_negated) = paste0(colnames(RNA_expr_Smat_negated), "_not")
+final_RNA_expr_matrix <- cbind(RNA_expr_Smat, RNA_expr_Smat_negated)
+dim(final_RNA_expr_matrix)
+final_RNA_expr_matrix[1:5,1:5]
+
+
+Protein_expr_Smat <- Matrix(as.matrix(Protein_expr_df_log1p), sparse = TRUE)
+Protein_expr_Smat <- t(Protein_expr_Smat)
+# Calculate the column-wise maximums
+colMax <- apply(Protein_expr_Smat, 2, max, na.rm = TRUE)
+colMax[is.infinite(colMax)] <- NA
+# Subtract the original matrix values from the column-wise maximums
+Protein_expr_Smat_negated <- sweep(Protein_expr_Smat, 2, colMax, FUN = function(x, y) y - x)
+colnames(Protein_expr_Smat_negated) = paste0(colnames(Protein_expr_Smat_negated), "_not")
+final_Protein_expr_matrix <- cbind(Protein_expr_Smat, Protein_expr_Smat_negated)
+dim(final_Protein_expr_matrix)
+final_Protein_expr_matrix[1:5,1:5]
+
+
+## convert - in gene names to _
+colnames(final_RNA_expr_matrix) = gsub("-", "_", colnames(final_RNA_expr_matrix))
+colnames(final_Protein_expr_matrix) = gsub("-", "_", colnames(final_Protein_expr_matrix))
+
+```
+
+
+# calculate equivalent RNA and protein expressions for CARs
+```{r}
+
+RNA_breakpoint <- 61
+Protein_breakpoint <- 50
+
+RNA_res_list <- calcEquivalentExpression2(candidate_CARs, final_RNA_expr_matrix) 
+length(RNA_res_list)
+length(RNA_res_list[[1]])
+### Convert the list to a data frame
+candidateCARs_equivalent_RNA_Expression_res_df <- as.data.frame(RNA_res_list)
+colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- names(RNA_res_list)
+candidateCARs_equivalent_RNA_Expression_res_df = candidateCARs_equivalent_RNA_Expression_res_df[candidate_CARs]
+colnames(candidateCARs_equivalent_RNA_Expression_res_df) <- candidate_CARs_display
+candidateCARs_equivalent_RNA_Expression_res_df$CellType = "Non-BRCA"
+candidateCARs_equivalent_RNA_Expression_res_df$CellType[1:RNA_breakpoint] = "BRCA"
+
+
+
+Protein_res_list <- calcEquivalentExpression2(candidate_CARs, final_Protein_expr_matrix) 
+length(Protein_res_list)
+length(Protein_res_list[[1]])
+### Convert the list to a data frame
+candidateCARs_equivalent_Protein_Expression_res_df <- as.data.frame(Protein_res_list)
+colnames(candidateCARs_equivalent_Protein_Expression_res_df) <- names(Protein_res_list)
+candidateCARs_equivalent_Protein_Expression_res_df = candidateCARs_equivalent_Protein_Expression_res_df[candidate_CARs]
+colnames(candidateCARs_equivalent_Protein_Expression_res_df) <- candidate_CARs_display
+candidateCARs_equivalent_Protein_Expression_res_df$CellType = "Non-BRCA"
+candidateCARs_equivalent_Protein_Expression_res_df$CellType[1:Protein_breakpoint] = "BRCA"
+
+
+```
+
+
+
+# Figure 2H. Volcono plot
+```{r}
+
+RNA_Protein <- "RNA" # Protein RNA
+logFC_cutoff = 0.25
+
+
+if (RNA_Protein == "RNA"){
+  #### RNA
+  # Step 1: Remove columns with all NAs in either "BRCA" or "Non-BRCA" groups
+  plot_data <- candidateCARs_equivalent_RNA_Expression_res_df %>%
+    dplyr::select(where(~ !all(is.na(.[candidateCARs_equivalent_RNA_Expression_res_df$CellType == "BRCA"])) &
+                !all(is.na(.[candidateCARs_equivalent_RNA_Expression_res_df$CellType == "Non-BRCA"]))))
+}else{
+  #### Protein
+  # Step 1: Remove columns with all NAs in either "BRCA" or "Non-BRCA" groups
+  plot_data <- candidateCARs_equivalent_Protein_Expression_res_df %>%
+    dplyr::select(where(~ !all(is.na(.[candidateCARs_equivalent_Protein_Expression_res_df$CellType == "BRCA"])) &
+                !all(is.na(.[candidateCARs_equivalent_Protein_Expression_res_df$CellType == "Non-BRCA"]))))
+}
+
+# Step 2: Calculate mean expression for each gene in "BRCA" and "Non-BRCA" groups
+mean_expr <- plot_data %>%
+  group_by(CellType) %>%
+  summarise(across(everything(), mean, na.rm = TRUE)) %>%
+  pivot_longer(-CellType, names_to = "Gene", values_to = "MeanExpression") %>%
+  pivot_wider(names_from = CellType, values_from = MeanExpression)
+
+# Step 3: Compute log2 fold change (log2FC)
+mean_expr <- mean_expr %>%
+  mutate(log2FC = log2(BRCA / `Non-BRCA`))
+
+# Step 4: Compute adjusted p-values using Wilcoxon rank-sum test
+p_values <- sapply(colnames(plot_data)[-ncol(plot_data)], function(gene) {
+  wilcox.test(plot_data[[gene]] ~ plot_data$CellType)$p.value
+})
+
+# Adjust p-values for multiple testing
+adj_p_values <- p.adjust(p_values, method = "BH")
+
+# Combine results into a data frame
+volcano_data <- data.frame(
+  Gene = names(p_values),
+  log2FC = mean_expr$log2FC,
+  adj_p_value = adj_p_values
+)
+
+
+# Ensure 'volcano_data' is a standard data.frame (to avoid S4/DataFrame issues)
+volcano_data <- as.data.frame(volcano_data)
+
+# Get top 10 and bottom 10 genes by log2FC
+top_genes <- volcano_data[order(-volcano_data$log2FC), ]
+bottom_genes <- volcano_data[order(volcano_data$log2FC), ]
+top_genes <- top_genes[!grepl("\\*", top_genes$Gene), ]
+top_genes <- top_genes[1:10,]
+bottom_genes <- bottom_genes[!grepl("\\*", bottom_genes$Gene), ]
+bottom_genes <- bottom_genes[1:10,]
+labeled_genes <- rbind(top_genes, bottom_genes)
+
+
+# Step 5: Create the volcano plot
+# PDF settings
+pdf_file   <- file.path(fig_dir, paste0("Figure2H_cancerCellLines_expr_volcano_",RNA_Protein,".pdf"))
+fig_width  <- 4*0.9*1.7
+fig_height <- 3*0.9
+fontSize   <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+volcano_plot <- ggplot(volcano_data, aes(x = log2FC, y = -log10(adj_p_value))) +
+  geom_point(
+    aes(
+      color = ifelse(
+        log2FC > logFC_cutoff & adj_p_value < 0.05, "red",
+        ifelse(log2FC < -logFC_cutoff & adj_p_value < 0.05, "blue", "grey")
+      )
+    ),
+    size = 2, alpha = 0.7
+  ) +
+  scale_color_identity() +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey") +
+  geom_vline(xintercept = c(-logFC_cutoff, logFC_cutoff), linetype = "dashed", color = "grey") +
+  geom_text_repel(  # Add labels for top/bottom genes
+    data = labeled_genes,
+    aes(label = Gene),
+    size = 2.5,
+    max.overlaps = Inf,  # Ensure all labels are shown
+    segment.color = "grey50"
+  ) +
+  labs(
+    x = "log2(Fold Change)",
+    y = "-log10(Adj. P-val)",
+    title = ""
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.border = element_blank(),
+    axis.text = element_text(color = "black")
+  )
+
+# Print the volcano plot
+print(volcano_plot)
+# Close the PDF device
+dev.off()
+
+
+RNA_sig_up <- volcano_data[volcano_data$log2FC>0.25 & volcano_data$adj_p_value < 0.05,]
+RNA_sig_down <- volcano_data[volcano_data$log2FC < -0.25 & volcano_data$adj_p_value < 0.05,]
+RNA_sig_up[order(RNA_sig_up$log2FC), ]
+
+Protein_sig_up <- volcano_data[volcano_data$log2FC > 0.25 & volcano_data$adj_p_value < 0.05,]
+Protein_sig_down <- volcano_data[volcano_data$log2FC < -0.25 & volcano_data$adj_p_value < 0.05,]
+
+```
+
+```{r}
+
+
+
+# Load required libraries
+library(ggplot2)
+library(ggrepel)  # For non-overlapping labels
+
+# Step 5: Create the volcano plot with labels
+pdf_file <- file.path(fig_dir, paste0("Figure2H_cancerCellLines_expr_volcano_", RNA_Protein, ".pdf"))
+fig_width <- 4 * 0.9
+fig_height <- 3 * 0.9
+fontSize <- 1.2
+
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+
+
+
+print(volcano_plot)
+dev.off()
+
+```
+

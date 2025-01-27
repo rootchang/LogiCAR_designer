@@ -1,0 +1,1660 @@
+---
+title: "Evaluate the efficacy of potential CARs and logic-gated CARs across Discovery and External-Validation datasets"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+#install.packages("showtext")
+library(showtext) # this package enables R to show special characters like ≤
+# Add a font and enable `showtext`
+font_add(family = "Arial", regular = "path/to/arial.ttf")  # Replace with the path to your Arial font file
+showtext_auto()
+
+```
+
+
+####################
+# check all below code, ensure '-' in gene name has been converted to '_' during processing
+# '-' is used only in display!!!
+####################
+
+
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
+surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Data/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+# Define custom colors for each group
+group_colors <- c(
+  "LogiCAR (N = 5)" = "#08306b",  # Deep blue
+  "LogiCAR (N = 4)" = "#2171b5",  # Dark blue
+  "LogiCAR (N = 3)" = "#4292c6",  # Medium blue
+  "LogiCAR (N = 2)" = "#6baed6",  # Light blue
+  "LogiCAR (N = 1)" = "#9ecae1",  # Very light blue
+  "Kwon et al." = "#006d2c",      # Deep green
+  "Dannenfelser et al." = "#41ab5d",  # Light green
+  "Clinical (BRCA)" = "#cb181d",  # Deep red
+  "Clinical (other tumors)" = "#fb6a4a"  # Light red (pink)
+)
+
+```
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+
+# (Optional) check HPA normal cells and public tumor cells input data for LogiCAR Designer
+```{r}
+
+geneExpr_tumor_df <- fread(paste0(data_dir,"/15BRCAdatasets_tumorCells_LogiCAR_wgene_and_clinical.txt"), sep = "\t", header = FALSE)
+dim(geneExpr_tumor_df)
+geneExpr_tumor_df[1:5,1:5]
+
+geneExpr_HPA_df <- fread(paste0(data_dir,"/HPA/version24_20241022/HPA_v24_1kCellsPerTissue_LogiCAR_cell_surface_genes_wgene_and_clinical.txt"), sep = "\t", header = FALSE)
+dim(geneExpr_HPA_df)
+geneExpr_HPA_df[1:5,1:5]
+
+```
+
+
+# (run once only!) read in and process top N-gene logic-gated CARs identified by LogiCAR Designer to standard format
+```{r}
+
+#top_logiCARs_data_dir = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety80/"
+top_logiCARs_data_dir = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/"
+
+top_logiCARs_files_suffix = c("singlets", "doublets_merged", "triplets_merged", "quadruples_merged", "quintuplets_merged")
+keep_topN = 15
+
+### extract top solutions with considering duplications (with N-1 genes the same)
+top_logiCARs_summary_df = data.frame()
+top_logiCARs_uniqueGenes = c()
+for (fn in top_logiCARs_files_suffix) {
+  print(paste(fn, "in processing ..."))
+  top_logiCARs_df = read.csv(file = paste0(top_logiCARs_data_dir, "AllDatasets_EachPatient500Cells_optimal_",fn,".txt"), sep = "\t", header = T)
+  top_logiCARs_dt = as.data.table(top_logiCARs_df)
+  # Remove brackets and split genes into a vector
+  top_logiCARs_dt$Genes <- str_replace_all(top_logiCARs_dt$Genes, "\\[|\\]|\\'", "")
+  top_logiCARs_dt[, GenesSplit := strsplit(Genes, ", ")]
+  current_list = list()
+  current_list[[1]] <- list(top_logiCARs_dt$GenesSplit[[1]], round(top_logiCARs_dt$Score[[1]],2), top_logiCARs_dt$LogicGates[[1]])
+  current_list_len = 1
+  for (row_i in 2:nrow(top_logiCARs_dt)){
+    flag = 1
+    if (fn != "singlets"){
+      for (item_j in 1:current_list_len){
+        Score_temp = round(top_logiCARs_dt$Score[[row_i]],2)
+        diff_num = length(setdiff(current_list[[item_j]][[1]], top_logiCARs_dt$GenesSplit[[row_i]]))
+        if ((diff_num < 2) & (Score_temp == current_list[[item_j]][[2]])){
+          flag = 0
+          break
+        }
+      }
+    }
+    if (flag == 1){
+      current_list[[current_list_len+1]] <- list(top_logiCARs_dt$GenesSplit[[row_i]], Score_temp, top_logiCARs_dt$LogicGates[[row_i]])
+      current_list_len = current_list_len + 1
+      if (current_list_len == keep_topN){
+        break
+      }
+    }
+  }
+  rows_used = row_i
+  print(paste(fn, rows_used))
+  #print(current_list)
+  # Apply the conversion function to the data to get standard representation of logiCARs
+  top_logiCARs_dt[, LogiCARs := mapply(convert_logic, LogicGates, Genes)]
+  
+  unique_genes <- unique(unlist(top_logiCARs_dt$GenesSplit[1:rows_used]))
+  unique_genes <- gsub("_not", "", unique_genes)
+  result_df_temp <- top_logiCARs_dt[1:rows_used, c("Genes", "LogiCARs", "Score", "GenesSplit")]
+  geneNum = length(top_logiCARs_dt$GenesSplit[[1]])
+  result_df_temp$geneNum = geneNum
+  top_logiCARs_summary_df = rbind(top_logiCARs_summary_df, result_df_temp)
+  top_logiCARs_uniqueGenes = unique(c(top_logiCARs_uniqueGenes, unique_genes))
+  #print(current_list)
+}
+
+## convert - in gene names to _
+top_logiCARs_summary_df$LogiCARs = gsub("-", "_", top_logiCARs_summary_df$LogiCARs)
+
+# Print the results
+dim(top_logiCARs_summary_df)
+length(top_logiCARs_uniqueGenes)
+
+```
+
+# load and process sampled tumor and normal cell RNA expression data (as LogiCAR Designer input)
+```{r}
+
+### load HPA RNA Discovery data  31000 cells *  5448/2 genes
+data_HPA_RNA = fread(file = paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/HPA_LogiCAR_cell_surface_genes_wgene_and_clinical.txt"), sep = "\t", header = F) 
+data_HPA_RNA[1:5,1:5]
+data_HPA_RNA_onlyData = data_HPA_RNA[3:nrow(data_HPA_RNA),,drop=F]
+data_HPA_RNA_onlyData[1:5,1:5]
+data_HPA_RNA_geneNAs = data_HPA_RNA_onlyData$V1
+data_HPA_RNA_onlyData$V1 = NULL
+
+# Step 1: Convert the data.table to a numeric matrix
+data_HPA_RNA_onlyData <- as.matrix(data_HPA_RNA_onlyData)
+rownames(data_HPA_RNA_onlyData) <- data_HPA_RNA_geneNAs
+data_HPA_RNA_onlyData <- apply(data_HPA_RNA_onlyData, 2, as.numeric)  # Convert to numeric
+# Step 2: Convert the numeric matrix to a sparse matrix
+data_HPA_RNA_onlyData <- Matrix(data_HPA_RNA_onlyData, sparse = TRUE)
+# Step 3: Transpose the sparse matrix
+data_HPA_RNA_onlyData <- t(data_HPA_RNA_onlyData)
+dim(data_HPA_RNA_onlyData)
+colnames(data_HPA_RNA_onlyData) <- data_HPA_RNA_geneNAs
+data_HPA_RNA_onlyData_negated <- data_HPA_RNA_onlyData == 0
+data_HPA_RNA_onlyData_negated <- as(data_HPA_RNA_onlyData_negated, "CsparseMatrix")
+colnames(data_HPA_RNA_onlyData_negated) = paste0(data_HPA_RNA_geneNAs, "_not")
+data_HPA_RNA_final_matrix <- cbind(data_HPA_RNA_onlyData, data_HPA_RNA_onlyData_negated)
+dim(data_HPA_RNA_final_matrix)
+data_HPA_RNA_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_HPA_RNA_final_matrix) = gsub("-", "_", colnames(data_HPA_RNA_final_matrix))
+
+
+#### load tumor data (public datasets Discovery) 72432 cells *  5450/2 genes
+data_tumor = fread("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/15BRCAdatasets_tumorCells_LogiCAR_wgene_and_clinical.txt", sep = "\t", header = F)
+data_tumor[1:5,1:5]
+data_tumor_onlyData = data_tumor[4:nrow(data_tumor),,drop=F]
+data_tumor_onlyData[1:5,1:5]
+data_tumor_geneNAs <- data_tumor_onlyData$V1
+data_tumor_onlyData$V1 = NULL
+
+# Step 1: Convert the data.table to a numeric matrix
+data_tumor_onlyData <- as.matrix(data_tumor_onlyData)
+rownames(data_tumor_onlyData) <- data_tumor_geneNAs
+data_tumor_onlyData <- apply(data_tumor_onlyData, 2, as.numeric)  # Convert to numeric
+# Step 2: Convert the numeric matrix to a sparse matrix
+data_tumor_onlyData <- Matrix(data_tumor_onlyData, sparse = TRUE)
+# Step 3: Transpose the sparse matrix
+data_tumor_onlyData <- t(data_tumor_onlyData)
+dim(data_tumor_onlyData)
+colnames(data_tumor_onlyData) <- data_tumor_geneNAs
+data_tumor_onlyData_negated <- data_tumor_onlyData == 0
+data_tumor_onlyData_negated <- as(data_tumor_onlyData_negated, "CsparseMatrix")
+colnames(data_tumor_onlyData_negated) = paste0(data_tumor_geneNAs, "_not")
+data_tumor_final_matrix <- cbind(data_tumor_onlyData, data_tumor_onlyData_negated)
+dim(data_tumor_final_matrix)
+data_tumor_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_tumor_final_matrix) = gsub("-", "_", colnames(data_tumor_final_matrix))
+
+
+```
+
+# (run for once only!!) filtering top N-gene logic-gated CARs identified by LogiCAR Designer by safety
+# filter identified top logiCARs by safety (for same efficacy and N-1 same gene logiCARs, only keep one highest safety)
+```{r}
+
+# efficacy RNA
+efficacy_res_list <- calcEquivalentExpression2(top_logiCARs_summary_df$LogiCARs, data_tumor_final_matrix) 
+length(efficacy_res_list)
+length(efficacy_res_list[[1]])
+
+# safety RNA
+safety_res_list <- calcEquivalentExpression2(top_logiCARs_summary_df$LogiCARs, data_HPA_RNA_final_matrix) 
+length(safety_res_list)
+length(safety_res_list[[1]])
+
+result_df = data.frame(LogiCARs = as.character(),
+                       Efficay = as.numeric(),
+                       Safety = as.numeric()
+                       )
+# Loop through the names in safety_res_list
+for (le in names(safety_res_list)) {
+  # Calculate Efficacy and Safety
+  Efficacy <- mean(efficacy_res_list[[le]])
+  Safety <- 1 - mean(safety_res_list[[le]])
+  # Append the results as a new row to the data frame
+  result_df <- rbind(result_df, data.frame(LogiCARs = le, Efficacy = Efficacy, Safety = Safety))
+}
+
+
+top_logiCARs_summary_df_scored = merge(top_logiCARs_summary_df, result_df, by = "LogiCARs")
+
+### confirm that Score = Efficacy
+plot(top_logiCARs_summary_df_scored$Score, top_logiCARs_summary_df_scored$Efficacy)
+
+
+############################### filter LogiCARs to keep top N non-redundant targets
+has_n_minus_1_common_genes <- function(genes1, genes2) {
+  diff_genes <- setdiff(genes1, genes2)
+  return((length(diff_genes) <2) & length(genes1) > 1)
+}
+
+
+# ## Step1 Filter rows: Remove duplicates based on Score, keeping the highest Safety
+# filtered_top_logiCARs <- top_logiCARs_summary_df_scored[
+#   order(-Score, -Safety),  # Sort by Score (descending) and Safety (descending)
+#   .SD[!duplicated(Score)], # Remove duplicates based on Score, keeping the highest Safety
+#   by = geneNum             # Group by geneNum
+# ]
+
+# Reduce the resolution of Score
+top_logiCARs_summary_df_scored[, Score := round(Score, 2)]
+
+## Step 2: Deduplicate rows by grouping rows with N-1 genes the same and the same Score
+filtered_rows <- list()
+for (gene_num in unique(top_logiCARs_summary_df_scored$geneNum)) {
+  group <- top_logiCARs_summary_df_scored[geneNum == gene_num]
+  keep_rows <- !logical(nrow(group)) # all TRUE
+  for (i in 1:(nrow(group)-1)) {
+    if (keep_rows[i]) {
+      for (j in (i + 1):nrow(group)) {
+        if (keep_rows[j] &&
+            group$Score[i] == group$Score[j] &&
+            has_n_minus_1_common_genes(group$GenesSplit[[i]], group$GenesSplit[[j]])) {
+            if (group$Safety[i] >= group$Safety[j]) {
+              keep_rows[j] <- FALSE
+            } else {
+              keep_rows[i] <- FALSE
+              break
+            }
+          }
+        }
+      }
+    }
+  print(paste(gene_num, sum(keep_rows)))
+  filtered_rows[[as.character(gene_num)]] <- group[keep_rows]
+}
+
+filtered_top_logiCARs <- rbindlist(filtered_rows)
+
+## Step 3: Keep only the top 10 rows per geneNum after deduplication
+filtered_top_logiCARs <- filtered_top_logiCARs[
+  order(-Score, -Safety),
+  head(.SD, 10),
+  by = geneNum
+]
+
+
+filtered_top_logiCARs = filtered_top_logiCARs[order(-filtered_top_logiCARs$Efficacy), ]
+
+filtered_top_logiCARs <- filtered_top_logiCARs[
+  order(filtered_top_logiCARs$geneNum, -filtered_top_logiCARs$Efficacy),
+]
+
+save(filtered_top_logiCARs, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs.RData")
+#save(filtered_top_logiCARs, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety80/filtered_top_logiCARs.RData")
+
+```
+
+
+# load and process full tumor and normal cell expression data (all cells, filtered with surface genes only)
+```{r}
+
+
+### load HPA RNA data
+# server
+#seu_HPA_RNA = readRDS(file = paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/HPA/version24_20241022/seu_HPA_v24.rds"))  # 20025 features across 689601 samples within 1 assay
+# local
+seu_HPA_RNA = readRDS(file = paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/seu_HPA_v24.rds"))  # 20025 features across 689601 samples within 1 assay
+genes_HPA_RNA = rownames(seu_HPA_RNA)
+seu_HPA_RNA_counts_matrix <- GetAssayData(seu_HPA_RNA, slot = "counts")
+
+
+#### load tumor data (public datasets Discovery)
+## server
+#seu_tumor_15public = readRDS("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/seu_15BRCAdatasets_tumorCells_surfaceGenes_4MetaCol.rds")
+## local
+seu_tumor_15public = readRDS("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/seu_15BRCAdatasets_AllTumorCells_ProteinCodingGenes_4MetaCol.rds")
+colnames(seu_tumor_15public@meta.data)
+unique_15public_datasets = unique(seu_tumor_15public$dataset)
+aligned_table <- table(seu_tumor_15public$dataset)[match(unique_15public_datasets, names(table(seu_tumor_15public$dataset)))]
+tumor_15public_break_points <- c(0, cumsum(as.numeric(aligned_table)))
+genes_15public = rownames(seu_tumor_15public)
+tumor_15public_mat <- GetAssayData(seu_tumor_15public, layer = "RNA", slot = "counts")
+
+
+#### load tumor data (in-house datasets External)
+data_dir_Stefan = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/Stefan_snRNAseq/"
+data_dir_GSE246613 = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/GSE246613/"
+# seu_Stefan_tumor = readRDS(paste0(data_dir_Stefan, "Multiomics82_Tumor.rds"))
+# seu_GSE246613 = readRDS(paste0(data_dir_GSE246613, "GSE246613_seu_Tissue.rds"))
+geneExpr_mat_Stefan = readRDS(paste0(data_dir_Stefan,"Stefan_snRNAseq_proteinCodingGenes_TumorCells_sparse_matrix.rds"))
+genes_Stefan = rownames(geneExpr_mat_Stefan)
+geneExpr_mat_GSE246613 = readRDS(paste0(data_dir_GSE246613,"GSE246613_proteinCodingGenes_TumorCells_sparse_matrix.rds"))
+genes_GSE246613 = rownames(geneExpr_mat_GSE246613)
+geneExpr_mat_Stefan[1:5,1:5]
+geneExpr_mat_GSE246613[1:5,1:5]
+
+allGenes_tumor = intersect(genes_Stefan, genes_GSE246613) # 19088
+allGenes_measured = intersect(intersect(genes_HPA_RNA, genes_15public), allGenes_tumor) # 18983
+c("ELAPOR1", "ERBB4", "PRLR") %in% allGenes_measured
+
+
+```
+
+
+# extract all candidate CAR targets and genes for comparison
+```{r}
+
+
+clinical_targets = c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "CD80", "CD86", "TNFRSF10B", "FOLR1", "MPP2", "MUC16", "PMEL", "ROR2", "KDR", "EPHA2", "PSCA", "MET", "IL13RA2", "EPCAM", "EGFR", "FOLH1", "GPC3", "ERBB2", "MSLN", "CD276", "TM4SF1", "BSG", "CEACAM5", "ALPP", "GUCY2C", "TACSTD2")
+### (viable) previous computational combinations (exclude combinations with non-surface genes, i.e., genes not in our surface gene list)
+### old
+# Comptutional_CAR_bulk = c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not",  "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", "FLVCR1 & TRHDE_not", "EPHB3 & SLC16A7_not", "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", "LDLRAD3 & SSTR1_not")
+#### top 10
+Comptutional_CAR_bulk <- c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & EPHA2_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not", "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not")
+#### top 20
+#Comptutional_CAR_bulk <- c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & EPHA2_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not", "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", "FLVCR1 & TRHDE_not", "EPHB3 & SLC16A7_not", "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", "LDLRAD3 & SSTR1_not", "KREMEN2 & KL_not", "KREMEN2 & EPHA2_not", "KREMEN2 & MET_not", "KISS1R & TNFRSF9_not")
+
+### top 5 for AND, OR, NOT gates respectively
+Comptutional_CAR_sc = c("SLC39A6 & SPINT2", "TACSTD2 & TSPAN13", "CD24 & TM4SF1", "CD9 & SLC39A6", "BCAM & SPINT2",
+                        "BAMBI | PRLR", "NECTIN4 | PRLR", "BAMBI | NECTIN4", "LY6K | PRLR", "PRLR | VTCN1",
+                        "CLDN3 & TSPAN8_not", "SERINC2 & TSPAN8_not", "CLDN3 & PIGR_not", "PLPP2 & MUC4_not", "SERINC2 & PIGR_not"
+                        )
+#other = c("MUC1 | ERBB2", "ERBB4 | PRLR | ELAPOR1", "CLDN3 | ERBB4 | PRLR", "(HLA_E_not | CLDN3) & EMP3_not") # (MUC1 & ERBB2) https://link.springer.com/article/10.1007/s10875-012-9689-9
+other_targets = c()
+
+# Logic expressions
+### newly identified filtered top targets by LogiCAR Designer
+#load(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety80/filtered_top_logiCARs.RData") # variable name filtered_top_logiCARs
+logiCAR_combos = load(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs.RData")
+logiCAR_combos <- filtered_top_logiCARs$LogiCARs
+
+
+targets_vec = c(logiCAR_combos, clinical_targets, Comptutional_CAR_bulk, Comptutional_CAR_sc, other_targets)
+logiCAR_combos_df = as.data.frame(filtered_top_logiCARs)[c("LogiCARs", "geneNum")]
+logiCAR_combos_df$Group = "LogiCAR Designer"
+Clinical_CARs_df = data.frame(LogiCARs = clinical_targets)
+Clinical_CARs_df$geneNum = 1
+Clinical_CARs_df$Group = "Clinical Targets"
+Comptutional_CARs_df = data.frame(LogiCARs = c(Comptutional_CAR_bulk, Comptutional_CAR_sc))
+Comptutional_CARs_df$geneNum = 2
+Comptutional_CARs_df$Group = c(rep("Previous Comptutional (bulk)", length(Comptutional_CAR_bulk)), rep("Previous Comptutional (sc)", length(Comptutional_CAR_sc)))
+Other_CARs_df <- if (length(other_targets) > 0) {
+  data.frame(
+    LogiCARs = other_targets,
+    geneNum = NA,
+    Group = "Other Targets"
+  )
+} else {
+  data.frame(
+    LogiCARs = character(0),
+    geneNum = numeric(0),
+    Group = character(0)
+  )
+}
+targets_df = rbind(logiCAR_combos_df, Clinical_CARs_df, Comptutional_CARs_df, Other_CARs_df)
+
+
+## get unique single genes from above vector
+cleaned_combos <- gsub("[|&()]", "", targets_vec)  # Remove |, &, (, )
+cleaned_combos <- gsub("_not", "", cleaned_combos)    # Remove _not
+all_genes <- unlist(strsplit(cleaned_combos, "\\s+"))
+unique_genes <- unique(all_genes)
+unique_CARtargets_measured = unique_genes # intersect(unique_genes, allGenes_measured) # allGenes_tumor allGenes_measured
+## get targets that all genes present in HPA protein measurement
+# Function to check if all genes in a logic combination are in unique_CARtargets_measured
+is_valid_combo <- function(combo, valid_genes) {
+  # Extract genes from the logic combination
+  genes <- unlist(strsplit(combo, "[|&() ]+"))  # Split by logical operators and spaces
+  genes <- gsub("_not", "", genes)    # Remove _not
+  genes <- genes[genes != ""]  # Remove empty strings
+  # Check if all genes are in valid_genes
+  all(genes %in% valid_genes)
+}
+filtered_indices = sapply(targets_vec, is_valid_combo, valid_genes = unique_CARtargets_measured)
+filtered_targets_vec <- targets_vec[filtered_indices]
+filtered_targets_df <- targets_df[filtered_indices, ]
+
+
+```
+
+# Figure 2B-C. SFigure**
+# plot boxplot showing the efficacy of N-gene CARs (N = 1,2,3,4,5) on Discovery data (500 cells per patient in 15 public datasets), full Stefan, and full Simon
+# plot boxplot showing the safety of N-gene CARs (N = 1,2,3,4,5) on Discovery data (1000 cells per dataset in HPA 31 public datasets)
+```{r}
+
+## identify duplicated CAR targets in different groups and remove duplicates
+duplicated_CARs = names(table(filtered_targets_df$LogiCARs)[table(filtered_targets_df$LogiCARs) > 1])
+filtered_targets_df[filtered_targets_df$LogiCARs %in% duplicated_CARs, ]
+#filtered_targets_df <- filtered_targets_df[!duplicated(filtered_targets_df$LogiCARs), ]
+#filtered_targets_df[filtered_targets_df$LogiCARs %in% duplicated_CARs, ]
+filtered_targets_df$LogiCARs_display <- filtered_targets_df$LogiCARs
+for (cc in duplicated_CARs) {
+  # Find the indices of the current duplicated LogiCARs value
+  indices <- which(filtered_targets_df$LogiCARs == cc)
+  # Add "*", "**", etc., based on the occurrence count
+  for (i in seq_along(indices)) {
+    if (i > 1) {  # Skip the first occurrence
+      filtered_targets_df$LogiCARs_display[indices[i]] <- paste0(cc, strrep("*", i - 1))
+    }
+  }
+}
+
+
+# efficacy RNA
+efficacy_res_list <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, data_tumor_final_matrix) 
+# first para: targets_vec; unique_genes_in_HPAprotein; filtered_targets_vec; unique_clinical_targets_measured; filtered_targets_df$LogiCARs
+# second para: tumor_15public_final_matrix; geneExpr_mat_GSE246613_CARs_final_matrix; geneExpr_mat_Stefan_CARs_final_matrix; data_tumor_final_matrix
+length(efficacy_res_list)
+length(efficacy_res_list[[1]])
+names(efficacy_res_list) <- filtered_targets_df$LogiCARs_display
+
+# safety RNA
+safety_res_list <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, data_HPA_RNA_final_matrix) 
+length(safety_res_list)
+length(safety_res_list[[1]])
+names(safety_res_list) <- filtered_targets_df$LogiCARs_display
+
+
+result_df = data.frame(LogiCARs_display = as.character(),
+  Efficay = as.numeric(),
+  Safety = as.numeric()
+  )
+# Loop through the names in safety_res_list
+for (le in names(safety_res_list)) {
+  # Calculate Efficacy and Safety
+  Efficacy <- mean(efficacy_res_list[[le]])
+  Safety <- 1 - mean(safety_res_list[[le]])
+  # Append the results as a new row to the data frame
+  result_df <- rbind(result_df, data.frame(LogiCARs_display = le, Efficacy = Efficacy, Safety = Safety))
+}
+
+# result_df = result_df[order(-result_df$Efficacy), ]
+# result_df2 = result_df[order(result_df$Safety), ]
+# print(result_df, width = 200)
+
+filtered_targets_withResult_df = merge(filtered_targets_df, result_df, by = "LogiCARs_display")
+dim(filtered_targets_withResult_df)
+
+
+
+########################### boxplot
+filtered_targets_withResult_df$Group2 = filtered_targets_withResult_df$Group
+filtered_targets_withResult_df$Group2[filtered_targets_withResult_df$Group2 == "Clinical Targets"] = "Clinical (other tumors)"
+filtered_targets_withResult_df$Group2[filtered_targets_withResult_df$LogiCARs %in% c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "PSCA", "MET", "EPCAM", "EGFR", "FOLH1", "ERBB2", "MSLN", "CD276", "TACSTD2")] = "Clinical (BRCA)"
+filtered_targets_withResult_df$Group2[filtered_targets_withResult_df$Group2 == "LogiCAR Designer"] = paste0("LogiCAR (N = ", filtered_targets_withResult_df$geneNum[filtered_targets_withResult_df$Group2 == "LogiCAR Designer"], ")")
+filtered_targets_withResult_df$Group2[filtered_targets_withResult_df$Group2 == "Previous Comptutional (bulk)"] = "Dannenfelser et al."
+filtered_targets_withResult_df$Group2[filtered_targets_withResult_df$Group2 == "Previous Comptutional (sc)"] = "Kwon et al."
+#filtered_targets_withResult_df$Group2 = factor(filtered_targets_withResult_df$Group2, levels = c("LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)"))
+filtered_targets_withResult_df$Group2 = factor(filtered_targets_withResult_df$Group2, levels = rev(c("LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)")))
+
+############ Boxplot with scatter points for efficacy comparison
+pdf_file <- paste0(fig_dir, "Figure2c_efficacy_on_Discovery_safety90.pdf")
+fig_width <- 2.3
+fig_height <- 2.7
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+ggplot(filtered_targets_withResult_df, aes(x = Group2, y = Efficacy * 100)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = NA) +  # Black boxplot with no fill
+  geom_jitter(width = 0.2, size = 1, alpha = 1, aes(color = Group2)) +  # Scatter points with group colors
+  scale_color_manual(values = group_colors) +  # Apply custom colors to scatter points
+  labs(
+    title = "",
+    x = "",
+    y = "Efficacy (%)"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range from 0 to 100
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black", angle = 60, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none"  # Remove legend
+  )
+dev.off()
+
+
+groupA = "Clinical (BRCA)" # "LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", 
+groupB = "Clinical (other tumors)" # "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)"
+wilcox.test(filtered_targets_withResult_df$Efficacy[filtered_targets_withResult_df$Group2 == groupA], filtered_targets_withResult_df$Efficacy[filtered_targets_withResult_df$Group2 == groupB])
+
+
+############ Boxplot with scatter points for safety comparison
+pdf_file <- paste0(fig_dir,paste0("Figure2c_safety_on_Discovery_safety90.pdf"))
+fig_width <- 2.3
+fig_height <- 2.7
+fontSize <- 1.2
+pdf(pdf_file, onefile=FALSE, width = fig_width,height=fig_height)
+ggplot(filtered_targets_withResult_df, aes(x = Group2, y = Safety * 100)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = NA) +  # Boxplot without showing outliers
+  geom_jitter(width = 0.2, size = 1, alpha = 1, aes(color = Group2)) +  # Scatter points with group colors
+  scale_color_manual(values = group_colors) +  # Apply custom colors to scatter points
+  geom_hline(yintercept = 90, linetype = "dashed", color = "grey") +  # Add dashed grey line at y = 90
+  labs(
+    title = "",
+    x = "",
+    y = "Safety (%)"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range from 0 to 100
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(color = "black", angle = 60, hjust = 1),  
+    legend.position = "none"
+  )
+dev.off()
+
+
+
+############ scatter plot for safety (y) vs efficacy (x)
+# Define custom colors for the 8 groups
+
+# Define custom shapes for the 8 groups
+my.shapes <- c(
+  "LogiCAR (N = 5)" = 16,  # Solid circle
+  "LogiCAR (N = 4)" = 15,  # Solid Square 
+  "LogiCAR (N = 3)" = 18,  # Solid diamond
+  "LogiCAR (N = 2)" = 17,  # Solid triangle
+  "LogiCAR (N = 1)" = 3,  # +
+  
+  "Kwon et al." = 16,  # Solid circle 
+  "Dannenfelser et al." = 16,  # Solid circle
+  
+  "Clinical (other tumors)" = 16,  # Solid circle
+  "Clinical (BRCA)" = 16       # Solid circle
+)
+
+
+# Create new data frame for predicted values and confidence intervals
+new_data <- data.frame(Efficacy = seq(min(filtered_targets_withResult_df$Efficacy), max(filtered_targets_withResult_df$Efficacy), by = 0.01))
+conf_interval <- predict(lm(Safety ~ Efficacy, data = filtered_targets_withResult_df), newdata = new_data, interval = "confidence", level = 0.95)
+new_data$Safety <- conf_interval[, "fit"]
+new_data$ymin <- conf_interval[, "lwr"]
+new_data$ymax <- conf_interval[, "upr"]
+
+# Scale Efficacy and Safety to percentages for plotting
+new_data$Efficacy <- new_data$Efficacy * 100
+new_data$Safety <- new_data$Safety * 100
+new_data$ymin <- new_data$ymin * 100
+new_data$ymax <- new_data$ymax * 100
+
+# Calculate Pearson correlation coefficient (PCC) and p-value
+cor_test_result <- cor.test(filtered_targets_withResult_df$Efficacy * 100, filtered_targets_withResult_df$Safety * 100, method = "pearson")
+pcc <- round(cor_test_result$estimate, 2)  # Round PCC to 2 decimal places
+p_value <- format(cor_test_result$p.value, scientific = TRUE, digits = 2)  # Format p-value in scientific notation
+
+# Save the plot to a PDF file
+pdf_file <- paste0(fig_dir, "Figure2c_safety_vs_safety_scatter.pdf")
+fig_width <- 4 * 1.1
+fig_height <- 2.7 * 1.1
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+
+# Create the plot
+ggplot(filtered_targets_withResult_df, aes(x = Efficacy * 100, y = Safety * 100, color = Group2, shape = Group2)) + 
+  geom_point(size = 1.5, alpha = 1) +  # Scatter points with size and transparency
+  geom_hline(yintercept = 90, linetype = "dashed", color = "grey") +  # Add dashed grey line at y = 90
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +  # Add regression line for all data
+  geom_ribbon(data = new_data, aes(x = Efficacy, ymin = ymin, ymax = ymax), fill = "black", alpha = 0.2, inherit.aes = FALSE) +  # Add confidence interval
+  scale_color_manual(values = group_colors) +  # Use custom colors
+  scale_shape_manual(values = my.shapes) +  # Use custom shapes
+  labs(
+    title = "",
+    x = "Efficacy (%)",
+    y = "Safety (%)",
+    color = "",  # Remove legend title for color
+    shape = ""   # Remove legend title for shape
+  ) +
+  scale_y_continuous(limits = c(50, 100)) +  # Set y-axis range from 50 to 100
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(color = "black", hjust = 1)  # Adjust x-axis text alignment
+  ) +
+  annotate("text", x = 5, y = 70, label = paste0("r = ", pcc, "\np = ", p_value), 
+           hjust = 0, vjust = 1, size = 4, color = "black")  # Add PCC and p-value annotation
+
+dev.off()
+
+
+filtered_targets_withResult_df[order(-filtered_targets_withResult_df$Efficacy), ]
+
+```
+
+
+# Figure 2D-F. calculate efficacy  of N-gene CARs (N = 1,2,3,4,5) on full external data (Stefan, Simon) of tumor cells and safety on HPA
+```{r}
+
+####################### ####################### ####################### ####################### ####################### 
+####################### process single cell data, extract gene expression of unique_CARtargets_measured
+####################### ####################### ####################### ####################### ####################### 
+
+#### process tumor data (in-house datasets External)
+### Stefan
+geneExpr_mat_Stefan_CARs = geneExpr_mat_Stefan[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_Stefan_CARs <- t(geneExpr_mat_Stefan_CARs)
+colnames(geneExpr_mat_Stefan_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_Stefan_CARs_negated <- (geneExpr_mat_Stefan_CARs == 0)*1
+geneExpr_mat_Stefan_CARs_negated <- Matrix(geneExpr_mat_Stefan_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_Stefan_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_Stefan_CARs_negated[1:5,1:5]
+
+geneExpr_mat_Stefan_CARs_final_matrix <- cbind(geneExpr_mat_Stefan_CARs, geneExpr_mat_Stefan_CARs_negated)
+dim(geneExpr_mat_Stefan_CARs_final_matrix)
+geneExpr_mat_Stefan_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_Stefan_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_Stefan_CARs_final_matrix))
+
+### GSE246613
+geneExpr_mat_GSE246613_CARs = geneExpr_mat_GSE246613[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_GSE246613_CARs <- t(geneExpr_mat_GSE246613_CARs)
+colnames(geneExpr_mat_GSE246613_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_GSE246613_CARs_negated <- (geneExpr_mat_GSE246613_CARs == 0)*1
+geneExpr_mat_GSE246613_CARs_negated <- Matrix(geneExpr_mat_GSE246613_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_GSE246613_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_GSE246613_CARs_negated[1:5,1:5]
+
+geneExpr_mat_GSE246613_CARs_final_matrix <- cbind(geneExpr_mat_GSE246613_CARs, geneExpr_mat_GSE246613_CARs_negated)
+dim(geneExpr_mat_GSE246613_CARs_final_matrix)
+geneExpr_mat_GSE246613_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_GSE246613_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_GSE246613_CARs_final_matrix))
+
+
+
+# efficacy RNA
+efficacy_res_list1 <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, geneExpr_mat_Stefan_CARs_final_matrix) 
+efficacy_res_list2 <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, geneExpr_mat_GSE246613_CARs_final_matrix) 
+names(efficacy_res_list1) <- filtered_targets_df$LogiCARs_display
+names(efficacy_res_list2) <- filtered_targets_df$LogiCARs_display
+
+# safety RNA
+safety_res_list <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, data_HPA_RNA_final_matrix) 
+length(safety_res_list)
+length(safety_res_list[[1]])
+names(safety_res_list) <- filtered_targets_df$LogiCARs_display
+
+result_df = data.frame(LogiCARs_display = as.character(),
+                       Efficacy_Stefan = as.numeric(),
+                       Efficacy_Simon = as.numeric(),
+                       Safety = as.numeric()
+                       )
+# Loop through the names in safety_res_list
+for (le in names(safety_res_list)) {
+  # Calculate Efficacy and Safety
+  Efficacy1 <- mean(efficacy_res_list1[[le]])
+  Efficacy2 <- mean(efficacy_res_list2[[le]])
+  Safety <- 1 - mean(safety_res_list[[le]])
+  # Append the results as a new row to the data frame
+  result_df <- rbind(result_df, data.frame(LogiCARs_display = le, Efficacy_Stefan = Efficacy1, Efficacy_Simon = Efficacy2, Safety = Safety))
+}
+# result_df = result_df[order(-result_df$Efficacy), ]
+# result_df2 = result_df[order(result_df$Safety), ]
+# print(result_df, width = 200)
+
+filtered_targets_withExternalResult_df = merge(filtered_targets_df, result_df, by = "LogiCARs_display")
+dim(filtered_targets_withExternalResult_df)
+
+
+
+
+########################### boxplot
+filtered_targets_withExternalResult_df$Group2 = filtered_targets_withExternalResult_df$Group
+filtered_targets_withExternalResult_df$Group2[filtered_targets_withExternalResult_df$Group2 == "Clinical Targets"] = "Clinical (other tumors)"
+filtered_targets_withExternalResult_df$Group2[filtered_targets_withExternalResult_df$LogiCARs %in% c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "PSCA", "MET", "EPCAM", "EGFR", "FOLH1", "ERBB2", "MSLN", "CD276", "TACSTD2")] = "Clinical (BRCA)"
+filtered_targets_withExternalResult_df$Group2[filtered_targets_withExternalResult_df$Group2 == "LogiCAR Designer"] = paste0("LogiCAR (N = ", filtered_targets_withExternalResult_df$geneNum[filtered_targets_withExternalResult_df$Group2 == "LogiCAR Designer"], ")")
+filtered_targets_withExternalResult_df$Group2[filtered_targets_withExternalResult_df$Group2 == "Previous Comptutional (bulk)"] = "Dannenfelser et al."
+filtered_targets_withExternalResult_df$Group2[filtered_targets_withExternalResult_df$Group2 == "Previous Comptutional (sc)"] = "Kwon et al."
+#filtered_targets_withExternalResult_df$Group2 = factor(filtered_targets_withExternalResult_df$Group2, levels = c("LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)"))
+filtered_targets_withExternalResult_df$Group2 = factor(filtered_targets_withExternalResult_df$Group2, levels = rev(c("LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)")))
+
+############ Boxplot with scatter points for efficacy comparison
+pdf_file <- paste0(fig_dir,paste0("Figure2d_efficacy_on_Stefan_safety90.pdf"))
+fig_width <- 2.3
+fig_height <- 2.7
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+ggplot(filtered_targets_withExternalResult_df, aes(x = Group2, y = Efficacy_Stefan * 100)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = NA) +  # Black boxplot with no fill
+  geom_jitter(width = 0.2, size = 1, alpha = 1, aes(color = Group2)) +  # Scatter points with group colors
+  scale_color_manual(values = group_colors) +  # Apply custom colors to scatter points
+  labs(
+    title = "",
+    x = "",
+    y = "Efficacy (%)"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range from 0 to 100
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black", angle = 60, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none"  # Remove legend
+  )
+dev.off()
+
+groupA = "Kwon et al." # "LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", 
+groupB = "LogiCAR (N = 2)" # "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)"
+wilcox.test(filtered_targets_withExternalResult_df$Efficacy_Stefan[filtered_targets_withExternalResult_df$Group2 == groupA], filtered_targets_withExternalResult_df$Efficacy_Stefan[filtered_targets_withExternalResult_df$Group2 == groupB])
+
+
+############ Boxplot with scatter points for safety comparison
+pdf_file <- paste0(fig_dir,paste0("Figure2d_efficacy_on_Simon_safety90.pdf"))
+fig_width <- 2.3
+fig_height <- 2.7
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+ggplot(filtered_targets_withExternalResult_df, aes(x = Group2, y = Efficacy_Simon * 100)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = NA) +  # Black boxplot with no fill
+  geom_jitter(width = 0.2, size = 1, alpha = 1, aes(color = Group2)) +  # Scatter points with group colors
+  scale_color_manual(values = group_colors) +  # Apply custom colors to scatter points
+  labs(
+    title = "",
+    x = "",
+    y = "Efficacy (%)"
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range from 0 to 100
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black", angle = 60, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none"  # Remove legend
+  )
+dev.off()
+
+groupA = "LogiCAR (N = 3)" # "LogiCAR (N = 5)", "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", 
+groupB = "Kwon et al." # "LogiCAR (N = 4)", "LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)"
+wilcox.test(filtered_targets_withExternalResult_df$Efficacy_Simon[filtered_targets_withExternalResult_df$Group2 == groupA], filtered_targets_withExternalResult_df$Efficacy_Simon[filtered_targets_withExternalResult_df$Group2 == groupB])
+
+
+
+############ scatter plot for safety (y) vs mean efficacy (x)
+filtered_targets_withExternalResult_df$Efficacy_mean = rowMeans(filtered_targets_withExternalResult_df[c("Efficacy_Stefan", "Efficacy_Simon")])
+# Define custom shapes for the 8 groups
+my.shapes <- c(
+  "LogiCAR (N = 5)" = 16,  # Solid circle
+  "LogiCAR (N = 4)" = 15,  # Solid Square 
+  "LogiCAR (N = 3)" = 18,  # Solid diamond
+  "LogiCAR (N = 2)" = 17,  # Solid triangle
+  "LogiCAR (N = 1)" = 3,  # +
+  
+  "Kwon et al." = 16,  # Solid circle 
+  "Dannenfelser et al." = 16,  # Solid circle
+  
+  "Clinical (other tumors)" = 16,  # Solid circle
+  "Clinical (BRCA)" = 16       # Solid circle
+)
+
+# Create new data frame for predicted values and confidence intervals
+new_data <- data.frame(Efficacy_mean = seq(min(filtered_targets_withExternalResult_df$Efficacy_mean), max(filtered_targets_withExternalResult_df$Efficacy_mean), by = 0.01))
+conf_interval <- predict(lm(Safety ~ Efficacy_mean, data = filtered_targets_withExternalResult_df), newdata = new_data, interval = "confidence", level = 0.95)
+new_data$Safety <- conf_interval[, "fit"]
+new_data$ymin <- conf_interval[, "lwr"]
+new_data$ymax <- conf_interval[, "upr"]
+
+# Scale Efficacy_mean and Safety to percentages for plotting
+new_data$Efficacy_mean <- new_data$Efficacy_mean * 100
+new_data$Safety <- new_data$Safety * 100
+new_data$ymin <- new_data$ymin * 100
+new_data$ymax <- new_data$ymax * 100
+
+# Calculate Pearson correlation coefficient (PCC) and p-value
+cor_test_result <- cor.test(filtered_targets_withExternalResult_df$Efficacy_mean * 100, filtered_targets_withExternalResult_df$Safety * 100, method = "pearson")
+pcc <- round(cor_test_result$estimate, 2)  # Round PCC to 2 decimal places
+p_value <- format(cor_test_result$p.value, scientific = TRUE, digits = 2)  # Format p-value in scientific notation
+
+# Save the plot to a PDF file
+pdf_file <- paste0(fig_dir,paste0("Figure2h_externalEfficacy_vs_safety_scatter.pdf"))
+fig_width <- 4 * 1.1
+fig_height <- 2.7 * 1.1
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+
+# Create the plot
+ggplot(filtered_targets_withExternalResult_df, aes(x = Efficacy_mean * 100, y = Safety * 100, color = Group2, shape = Group2)) + 
+  geom_point(size = 1.5, alpha = 1) +  # Scatter points with size and transparency
+  geom_hline(yintercept = 90, linetype = "dashed", color = "grey") +  # Add dashed grey line at y = 90
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +  # Add regression line for all data
+  geom_ribbon(data = new_data, aes(x = Efficacy_mean, ymin = ymin, ymax = ymax), fill = "black", alpha = 0.2, inherit.aes = FALSE) +  # Add confidence interval
+  scale_color_manual(values = group_colors) +  # Use custom colors
+  scale_shape_manual(values = my.shapes) +  # Use custom shapes
+  labs(
+    title = "",
+    x = "Efficacy (%)",
+    y = "Safety (%)",
+    color = "",  # Remove legend title for color
+    shape = ""   # Remove legend title for shape
+  ) +
+  scale_y_continuous(limits = c(50, 100)) +  # Set y-axis range from 50 to 100
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(color = "black", hjust = 1)  # Adjust x-axis text alignment
+  ) +
+  annotate("text", x = 5, y = 70, label = paste0("r = ", pcc, "\np = ", p_value), 
+           hjust = 0, vjust = 1, size = 4, color = "black")  # Add PCC and p-value annotation
+
+dev.off()
+
+filtered_targets_withExternalResult_df[order(-filtered_targets_withExternalResult_df$Efficacy_mean), ]
+
+```
+
+# Figure 2G. Rank BRCA CAR targets based on average efficacy on all 17 datasets
+```{r}
+
+
+####################### ####################### ####################### ####################### ####################### 
+####################### process single cell data, extract gene expression of unique_CARtargets_measured
+####################### ####################### ####################### ####################### ####################### 
+
+#### process tumor data (all tumor cells from public datasets without sampling)
+tumor_15public_mat_CARs = tumor_15public_mat[unique_CARtargets_measured, , drop = F]
+tumor_15public_mat_CARs <- t(tumor_15public_mat_CARs > 0)
+dim(tumor_15public_mat_CARs)
+tumor_15public_mat_CARs[1:5,1:5]
+tumor_15public_mat_negated <- tumor_15public_mat_CARs == 0
+tumor_15public_mat_negated <- as(tumor_15public_mat_negated, "CsparseMatrix")
+colnames(tumor_15public_mat_negated) = paste0(unique_CARtargets_measured, "_not")
+tumor_15public_mat_negated[1:5,1:5]
+tumor_15public_final_matrix <- cbind(tumor_15public_mat_CARs, tumor_15public_mat_negated)
+dim(tumor_15public_final_matrix)
+tumor_15public_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(tumor_15public_final_matrix) = gsub("-", "_", colnames(tumor_15public_final_matrix))
+
+
+### efficacy
+efficacy_res_list3 <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, tumor_15public_final_matrix) 
+names(efficacy_res_list3) <- filtered_targets_df$LogiCARs_display
+
+
+
+# Initialize the result data frame with the appropriate structure
+result_df <- data.frame(
+  LogiCARs_display = character(), # First column as character
+  matrix(numeric(), ncol = length(unique_15public_datasets), nrow = 0) # Rest columns as numeric
+)
+colnames(result_df) <- c("LogiCARs_display", paste0("Efficacy_", unique_15public_datasets)) # Set column names
+
+# Loop through the names in safety_res_list
+for (le in names(efficacy_res_list3)) {
+  # Calculate Efficacy for each breakpoint
+  Efficacy_vec <- numeric() # Initialize as numeric for better performance
+  for (bp in seq_len(length(tumor_15public_break_points) - 1)) {
+    start_pt <- tumor_15public_break_points[bp] + 1
+    end_pt <- tumor_15public_break_points[bp + 1]
+    Efficacy <- mean(efficacy_res_list3[[le]][start_pt:end_pt], na.rm = TRUE) # Avoid NA issues
+    Efficacy_vec <- c(Efficacy_vec, Efficacy)
+  }
+  
+  # Append the results as a new row to the data frame
+  new_row <- data.frame(
+    LogiCARs_display = le, # First column
+    t(Efficacy_vec) # Transpose the vector to match the number of columns
+  )
+  colnames(new_row) <- colnames(result_df) # Ensure the column names match
+  result_df <- rbind(result_df, new_row) # Add the new row to the result_df
+}
+
+
+filtered_targets_15DatasetsResult_df = merge(filtered_targets_df, result_df, by = "LogiCARs_display")
+dim(filtered_targets_15DatasetsResult_df)
+filtered_targets_15DatasetsResult_df$geneNum = NULL
+filtered_targets_15DatasetsResult_df$Group = NULL
+colnames(filtered_targets_15DatasetsResult_df)
+
+
+### merge filtered_targets_15DatasetsResult_df with filtered_targets_withExternalResult_df
+filtered_targets_17DatasetsResult_df = merge(filtered_targets_15DatasetsResult_df, filtered_targets_withExternalResult_df, by = "LogiCARs_display")
+filtered_targets_17DatasetsResult_df$Efficacy_mean = NULL
+
+# To replace _not at the end of words with ! as a prefix 
+filtered_targets_17DatasetsResult_df$LogiCARs_display <- gsub(
+  pattern = "\\b(\\w+)_not\\b", 
+  replacement = "!\\1", 
+  filtered_targets_17DatasetsResult_df$LogiCARs_display
+)
+## convert _ in gene names to -
+filtered_targets_17DatasetsResult_df$LogiCARs_display = gsub("_", "-", filtered_targets_17DatasetsResult_df$LogiCARs_display)
+
+### extract only N<=3 and safety > 0.9 targets
+filtered_targets_17DatasetsResult_df_safer = filtered_targets_17DatasetsResult_df[(filtered_targets_17DatasetsResult_df$Safety >= 0.9) & (filtered_targets_17DatasetsResult_df$geneNum <= 3), ]
+filtered_targets_17DatasetsResult_df_safer$Safety = NULL
+filtered_targets_17DatasetsResult_df_safer$geneNum = NULL
+#filtered_targets_17DatasetsResult_df_safer$Group2 = NULL
+
+#filtered_targets_17DatasetsResult_df_safer$Group[filtered_targets_17DatasetsResult_df_safer$Group == "LogiCAR Designer"] = "LogiCAR (N \u2264 3)"
+#filtered_targets_17DatasetsResult_df_safer$Group[filtered_targets_17DatasetsResult_df_safer$Group == "Previous Comptutional (bulk)"] = "Dannenfelser et al."
+#filtered_targets_17DatasetsResult_df_safer$Group[filtered_targets_17DatasetsResult_df_safer$Group == "Previous Comptutional (sc)"] = "Kwon et al."
+#filtered_targets_17DatasetsResult_df_safer$Group[filtered_targets_17DatasetsResult_df_safer$Group2 == "Clinical (BRCA)"] = "Clinical (BRCA)"
+#filtered_targets_17DatasetsResult_df_safer$Group[filtered_targets_17DatasetsResult_df_safer$Group2 == "Clinical (other tumors)"] = "Clinical (other tumors)"
+filtered_targets_17DatasetsResult_df_safer$Group <- as.character(filtered_targets_17DatasetsResult_df_safer$Group2)
+unique(filtered_targets_17DatasetsResult_df_safer$Group)
+unique(filtered_targets_17DatasetsResult_df_safer$Group2)
+
+
+#### relabel another Kwon target that overlaps with ours (PRLR | VTCN1)
+filtered_targets_17DatasetsResult_df_safer$LogiCARs_display[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display == "PRLR | VTCN1"] = "VTCN1 | PRLR*"
+filtered_targets_17DatasetsResult_df_safer$LogiCARs_display[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display == "PRLR | ENPP5"] = "ENPP5 | PRLR"
+filtered_targets_17DatasetsResult_df_safer$LogiCARs.y = NULL
+colnames(filtered_targets_17DatasetsResult_df_safer)[colnames(filtered_targets_17DatasetsResult_df_safer) == "LogiCARs.x"] = "LogiCARs"
+write.csv(filtered_targets_17DatasetsResult_df_safer, paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"), row.names = F, quote = F)
+
+filtered_targets_17DatasetsResult_df_safer$LogiCARs <- filtered_targets_17DatasetsResult_df_safer$LogiCARs_display
+
+
+filtered_targets_17DatasetsResult_df_safer$LogiCARs_display[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display == "PRLR | VTCN1"] = "VTCN1 | PRLR*"
+filtered_targets_17DatasetsResult_df_safer$LogiCARs_display[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display == "PRLR | ENPP5"] = "ENPP5 | PRLR"
+filtered_targets_17DatasetsResult_df_safer$LogiCARs.y = NULL
+colnames(filtered_targets_17DatasetsResult_df_safer)[colnames(filtered_targets_17DatasetsResult_df_safer) == "LogiCARs.x"] = "LogiCARs"
+write.csv(filtered_targets_17DatasetsResult_df_safer, paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"), row.names = F, quote = F)
+
+
+
+
+
+
+
+
+############################ if have already run and saved results before, run from here  ############################
+filtered_targets_17DatasetsResult_df_safer = read.csv( paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"), row.names = NULL, header = T)
+
+filtered_targets_17DatasetsResult_df_safer <- filtered_targets_17DatasetsResult_df_safer[!(filtered_targets_17DatasetsResult_df_safer$Group2 %in% c("LogiCAR (N = 5)", "LogiCAR (N = 4)")), ]
+filtered_targets_17DatasetsResult_df_safer <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$Safety >= 0.9, ]
+filtered_targets_17DatasetsResult_df_safer$LogiCARs <- filtered_targets_17DatasetsResult_df_safer$LogiCARs_display
+
+
+######################## plot barplot of mean efficacy of targets across 17 datasets with errorbars and scatters, 
+plot_order = c("LogiCAR (N = 3)", "LogiCAR (N = 2)", "Kwon et al.", "Dannenfelser et al.", "LogiCAR (N = 1)", "Clinical (BRCA)", "Clinical (other tumors)")
+
+# Gather all Efficacy columns into a long format
+#colnames(filtered_targets_17DatasetsResult_df_safer) = gsub("Efficay", "Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))
+efficacy_long <- filtered_targets_17DatasetsResult_df_safer %>%
+  pivot_longer(
+    cols = starts_with("Efficacy_"), 
+    names_to = "Dataset", 
+    values_to = "Efficacy"
+  )
+efficacy_long$Dataset = gsub("Efficacy_", "", efficacy_long$Dataset)
+efficacy_long$Dataset[efficacy_long$Dataset == "Stefan"] = "In-house 1"
+efficacy_long$Dataset[efficacy_long$Dataset == "Simon"] = "In-house 2"
+unique(efficacy_long$Dataset)
+
+# Calculate mean and standard error for each group
+summary_stats <- efficacy_long %>%
+  group_by(Group2, LogiCARs) %>%
+  summarise(
+    Mean_Efficacy = mean(Efficacy, na.rm = TRUE),
+    SE_Efficacy = sd(Efficacy, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Order summary_stats by desired Group order and descending Mean_Efficacy within each group
+summary_stats <- summary_stats %>%
+  arrange(factor(Group2, levels = plot_order), desc(Mean_Efficacy))
+
+# Create the ordered LogiCARs factor based on the arranged summary_stats
+ordered_logiCARs <- unique(summary_stats$LogiCARs)
+
+#Now that we have the order, we need to apply it to the data frame used for plotting
+efficacy_long <- efficacy_long %>%
+  mutate(LogiCARs = factor(LogiCARs, levels = ordered_logiCARs))
+
+summary_stats <- summary_stats %>%
+  mutate(LogiCARs = factor(LogiCARs, levels = ordered_logiCARs))
+
+
+
+# Ensure Group is a factor with the desired levels (do this AFTER ordering LogiCARs)
+efficacy_long$Group <- factor(
+  efficacy_long$Group2,
+  levels = plot_order # Desired order
+)
+
+# Ensure Dataset is a factor with the desired levels
+efficacy_long$Dataset <- factor(
+  efficacy_long$Dataset,
+  levels = c("EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "GSE158724", "In-house 1", "In-house 2") # Desired order
+)
+
+# Ensure Group in summary_stats is a factor with the desired levels
+summary_stats$Group <- factor(
+  summary_stats$Group2,
+  levels = plot_order # Desired order
+)
+
+# Define custom colors for Dataset
+my.colors <- c(
+  "EMTAB8107" = "#117733",  # Dark green
+  "GSE176078" = "#332288",  # Dark blue
+  "Bassez_CohortA" = "#88CCEE",  # Sky blue
+  "Bassez_CohortB" = "#CC6677",  # Coral
+  "Wu" = "#DDCC77",  # Mustard
+  "GSE161529" = "#44AA99",  # Teal
+  "SRP114962" = "#999933",  # Olive green
+  "GSE140819" = "#882255",  # Burgundy
+  "GSE148673" = "#AA4499",  # Magenta
+  "GSE150660" = "#6699CC",  # Muted blue
+  "GSE143423" = "#117733",  # Forest green
+  "GSE138536" = "#88CCEE",  # Pale blue
+  "GSE118389" = "#DDCC77",  # Pale mustard
+  "GSE75688" = "#CC6677",  # Salmon
+  "GSE158724" = "#44AA99",  # Sea green
+  "In-house 1" = "#AA4499",  # Bright magenta
+  "In-house 2" = "#882255"  # Wine red
+)
+
+
+# Barplot with scatter points colored by Dataset
+pdf_file <- paste0(fig_dir, "Figure2I_efficacy_17datasets_ranking_barplot.pdf")
+fig_width <- 11
+fig_height <- 4.5
+fontSize <- 1.2
+pdf(pdf_file, onefile = FALSE, width = fig_width, height = fig_height)
+
+ggplot(summary_stats, aes(x = LogiCARs, y = Mean_Efficacy * 100, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  geom_errorbar(
+    aes(
+      ymin = Mean_Efficacy * 100 - SE_Efficacy * 100,
+      ymax = Mean_Efficacy * 100 + SE_Efficacy * 100
+    ),
+    width = 0.2, position = position_dodge(width = 0.9), color = "black"
+  ) +
+  geom_jitter(
+    data = efficacy_long,
+    aes(x = LogiCARs, y = Efficacy * 100, color = Dataset),
+    width = 0.2, size = 1, alpha = 1, inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = my.colors) +  # Use custom colors for Dataset
+  scale_fill_manual(values = group_colors) +  # Use custom colors for Group
+  labs(
+    title = "",
+    x = "",
+    y = "Efficacy (%)",
+    color = "Dataset",  # Legend title for color
+    fill = "Group"   # Legend title for fill
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = c(1.2, 0.1),
+    legend.text = element_text(family = "Arial"),  # Use a Unicode-compatible font: Arial sans
+    plot.margin = margin(5, 200, 5, 5)  # Add space on the right for the legend
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 2), ncol = 2),  # Increase legend symbol size for scatter points
+    fill = guide_legend(override.aes = list(size = 0))  # Keep bar legend symbols small
+  )
+
+dev.off()
+
+
+#### pair-wise Wilcoxon test
+filtered_targets_17DatasetsResult_df_safer$mean_efficacy <- rowMeans(filtered_targets_17DatasetsResult_df_safer[grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))])
+filtered_targets_17DatasetsResult_df_safer <- filtered_targets_17DatasetsResult_df_safer[order(-filtered_targets_17DatasetsResult_df_safer$mean_efficacy), ]
+
+best_logiCAR3 <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="(GABRP | PRLR) | VTCN1", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_logiCAR2 <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="PRLR | GABRP", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_Kwon <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="LY6K | PRLR", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_Dannenfilser <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="EPHB3 & !FZD5", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_logiCAR1 <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="ELAPOR1", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_ClinicalBRCA <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="PROM1", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+best_ClinicalOthers <- filtered_targets_17DatasetsResult_df_safer[filtered_targets_17DatasetsResult_df_safer$LogiCARs_display=="TNFRSF10B", grepl("Efficacy", colnames(filtered_targets_17DatasetsResult_df_safer))]
+
+
+wilcox.test(as.numeric(best_logiCAR3), as.numeric(best_logiCAR1), paired = T)
+
+```
+
+
+
+
+
+
+
+
+# (Suppl.) efficacy of clinical targets in different tumor datasets (heatmap, clustering, identify outlier datasets)
+```{r}
+
+library(pheatmap)
+
+
+unique_15public_datasets
+tumor_15public_break_points
+efficacy_res_list
+
+# Initialize the result data frame with appropriate dimensions
+result_df <- data.frame(matrix(NA, nrow = length(names(efficacy_res_list)), ncol = length(unique_15public_datasets)))
+rownames(result_df) <- names(efficacy_res_list)
+colnames(result_df) <- unique_15public_datasets
+
+# Loop through the names in efficacy_res_list
+for (le in names(efficacy_res_list)) {
+  # Calculate Efficacy
+  Efficacy_all <- numeric(length(unique_15public_datasets))  # Preallocate for efficiency
+  
+  for (bp_i in 1:(length(tumor_15public_break_points) - 1)) {
+    # Extract relevant data for the current dataset
+    data_temp <- efficacy_res_list[[le]][(tumor_15public_break_points[bp_i] + 1):tumor_15public_break_points[bp_i + 1]]
+    
+    # Calculate mean efficacy for the current dataset
+    Efficacy_temp <- mean(data_temp, na.rm = TRUE)
+    Efficacy_all[bp_i] <- Efficacy_temp
+  }
+  
+  # Assign calculated values to the appropriate row in result_df
+  result_df[le, ] <- Efficacy_all
+}
+
+print(result_df, width = 200)  # Adjust the width as needed
+
+
+
+
+####### heatmap
+result_df2 = t(result_df)
+output_file <- paste0(fig_dir,"heatmap_15datasets_clinicalCAR_efficacy.png")
+# Open a PNG graphics device
+png(output_file, width = 1200, height = 800, res = 150)  # Adjust width, height, and resolution as needed
+# Generate a heatmap with row and column clustering
+pheatmap(result_df2,
+         scale = "none",         # No scaling; keep original values
+         clustering_distance_rows = "euclidean",  # Distance metric for rows
+         clustering_distance_cols = "euclidean",  # Distance metric for columns
+         clustering_method = "complete",          # Clustering method
+         show_rownames = TRUE,   # Show row names
+         show_colnames = TRUE,   # Show column names
+         color = colorRampPalette(c("blue", "white", "red"))(100))  # Color scheme
+
+dev.off()
+
+```
+
+
+# load data
+```{r}
+
+### clinical CAR targets for solid tumors
+#clinical_targets_df = read.csv(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/Constants/solid_indications.txt", header = T, sep = "\t")
+clinical_targets = c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "CD80", "CD86", "TNFRSF10B", "FOLR1", "MPP2", "MUC16", "PMEL", "ROR2", "KDR", "EPHA2", "PSCA", "MET", "IL13RA2", "EPCAM", "EGFR", "FOLH1", "GPC3", "ERBB2", "MSLN", "CD276", "TM4SF1", "BSG", "CEACAM5", "ALPP", "GUCY2C", "TACSTD2")
+
+### computational targets (sc + bulk)
+# Cell Systems (bulk RNAseq)
+logiCAR_CellSystems = list("AN_FAP_EPHA2" = c("FAP", "EPHA2"), "AN_FAP_MET" = c("FAP", "MET"),"AN_OR2B6_BMP2" = c("OR2B6", "BMP2"),
+                          "AN_OR2B6_MET" = c("OR2B6", "MET"), "AN_SLC1A4_SSTR1" = c("SLC1A4", "SSTR1"), "AN_ADAM12_KDR" = c("ADAM12", "KDR"),
+                          "AN_EPHB3_FZD5" = c("EPHB3", "FZD5"), "AN_TNFRSF18_ABHD6" = c("TNFRSF18", "ABHD6"), "AN_ADAM12_GPC3" = c("ADAM12", "GPC3"),
+                          "AN_MUC1_LYVE1" = c("MUC1", "LYVE1"), "AN_SLC4A5_PTH1R" = c("SLC4A5", "PTH1R"), "AN_CNIH2_TMEM88" = c("CNIH2", "TMEM88"),
+                          "AN_FLVCR1_TRHDE" = c("FLVCR1", "TRHDE"), "AN_CNIH2_PVRL3" = c("CNIH2", "NECTIN3"), "AN_EPHB3_SLC16A7" = c("EPHB3", "SLC16A7"),
+                          "AN_EPCAM_SSTR1" = c("EPCAM", "SSTR1"), "AN_MUC1_SLC4A4" = c("MUC1", "SLC4A4"), "AN_TNFRSF18_SLC16A7" = c("TNFRSF18", "SLC16A7"),
+                          "AN_LDLRAD3_SSTR1" = c("LDLRAD3", "SSTR1")
+                    )
+# NBT (scRNAseq)
+logiCAR_NBT = list("A_ATP5MC1_KRT18" = c("ATP5MC1", "KRT18"), "A_ATP5MC1_KRT19" = c("ATP5MC1", "KRT19"), "A_ATP5MC1_KRT8" = c("ATP5MC1", "KRT8"), 
+                    "A_ATP5MC1_SPINT2" = c("ATP5MC1", "SPINT2"), "A_ATP5MC1_PPDPF" = c("ATP5MC1", "PPDPF"), "A_KRT18_MARCKSL1" = c("KRT18", "MARCKSL1"),
+                    "A_KRT19_MARCKSL1" = c("KRT19", "MARCKSL1"), "A_ATP5MC1_CD9" = c("ATP5MC1", "CD9"),
+                    "O_CD24_KRT19" = c("CD24", "KRT19"), "O_KRT18_KRT19" = c("KRT18", "KRT19"), "O_KRT19_KRT8" = c("KRT19", "KRT8"),
+                     "O_CD24_KRT18" = c("CD24", "KRT18"), "O_KRT19_MARCKSL1" = c("KRT19", "MARCKSL1"), "O_KRT19_SPINT2" = c("KRT19", "SPINT2"),
+                     "O_KRT18_MARCKSL1" = c("KRT18", "MARCKSL1"), "O_CD24_SPINT2" = c("CD24", "SPINT2"),
+                    "AN_KRT19_TSPAN8" = c("KRT19", "TSPAN8"), "AN_KRT19_MUC4" = c("KRT19", "MUC4"), "AN_KRT19_MECOM" = c("KRT19", "MECOM"),
+                    "AN_KRT18_TSPAN8" = c("KRT18", "TSPAN8"), "AN_KRT18_PIGR" = c("KRT18", "PIGR"), "AN_KRT19_SLC4A4" = c("KRT19", "SLC4A4"),
+                    "AN_KRT19_CCND2" = c("KRT19", "CCND2"), "AN_KRT19_MUC3A" = c("KRT19", "MUC3A")
+                    )
+### check which genes are NOT in the surface gene list
+CellSystems_genes = unique(unlist(logiCAR_CellSystems))
+NBT_genes = unique(unlist(logiCAR_NBT))
+CellSystems_genes[!(CellSystems_genes %in% surface_genes)]
+# "BMP2": Vesicles, Plasma membrane, Primary cilium, Primary cilium transition zone (predicted secreted); BMP2 is secreted, not a transmembrane protein.
+# "ABHD6": Vesicles & Nucleoplasm (predicted membrane); Anchored to membranes; primarily an intracellular-facing enzyme.
+# "CNIH2": Not available (predicted membrane); Functions mainly in AMPA receptor trafficking, not stably on surface.
+# "TMEM88": Not available (predicted membrane); Single-pass transmembrane protein; limited data on surface expression. potentially a CAR target
+NBT_genes[(NBT_genes %in% surface_genes)]
+# "ATP5MC1"  "KRT18"    "KRT19"    "KRT8"     "PPDPF"    "MARCKSL1" "MECOM"    "CCND2": none are cell surface genes
+### (viable) combinations
+Comptutional_CAR_bulk = c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & BMP2_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not", "TNFRSF18 & ABHD6_not", "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", "CNIH2 & TMEM88_not", "FLVCR1 & TRHDE_not", "CNIH2 & NECTIN3_not", "EPHB3 & SLC16A7_not", "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", "LDLRAD3 & SSTR1_not")
+Comptutional_CAR_sc = c(
+  "ATP5MC1 & KRT18", "ATP5MC1 & KRT19", "ATP5MC1 & KRT8", "ATP5MC1 & SPINT2", "ATP5MC1 & PPDPF",
+  "KRT18 & MARCKSL1", "KRT19 & MARCKSL1", "ATP5MC1 & CD9",
+  "CD24 | KRT19", "KRT18 | KRT19", "KRT19 | KRT8", "CD24 | KRT18", "KRT19 | MARCKSL1", "KRT19 | SPINT2",
+  "KRT18 | MARCKSL1", "CD24 | SPINT2",
+  "KRT19 & TSPAN8_not", "KRT19 & MUC4_not", "KRT19 & MECOM_not", "KRT18 & TSPAN8_not", "KRT18 & PIGR_not",
+  "KRT19 & SLC4A4_not", "KRT19 & CCND2_not", "KRT19 & MUC3A_not"
+)
+
+### newly identified targets
+logiCAR_combos = c('PTPRK | KIAA1324 | CA12',
+                   'GABRP | KIAA1324 | TACSTD2',
+                   'GABRP | KIAA1324 | PRLR', # safety >0.9
+                   #'(IRAG1_not & PTPRF) | KIAA1324', 
+                   '((SLC39A6 | GABRP) & ACKR4_not) | (KIAA1324 | BAMBI)'
+                   )  #  # OA_O_O: ((G1 | G2) & G3) | (G1 | G2)
+
+### merged tumor scRNAseq
+seu_integrated = readRDS(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/seu_integrated_allBRCAdatasets.rds")
+colnames(seu_integrated@meta.data)
+
+# seu_test = readRDS(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/GSE161529/seu_Tissue.rds")
+# colnames(seu_test@meta.data)
+# table(seu_test$cellType)
+# unique(seu_test$patient_id)
+
+### HPA scRNAseq
+seu_HPA = readRDS(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/seu_HPA_v24.rds")
+colnames(seu_HPA@meta.data)
+unique(seu_HPA$Tissue_grouped)
+unique(seu_HPA$cell_group_custom)
+
+### HPA protein-level expression
+
+
+
+```
+
+
+# efficacy landscape of clinical targets (for all solid tumors), computational targets (sc + bulk), and newly identified targets
+```{r}
+
+# extract gene expression counts to table / data frame (whichever is faster / more efficient)
+seu_integrated
+setdiff(surface_genes, rownames(seu_integrated))
+
+# Step 2: Extract the gene expression matrix (counts) for the subsetted object
+tumorCells_surfaceGenes_counts <- GetAssayData(seu_integrated, assay = "RNA", slot = "counts")
+colnames(tumorCells_surfaceGenes_counts) = NULL
+
+# Step 3: Convert the gene expression matrix to a binary matrix
+# (0 = FALSE, >0 = TRUE)
+tumorCells_surfaceGenes_binaryExpr <- tumorCells_surfaceGenes_counts > 0
+colnames(tumorCells_surfaceGenes_binaryExpr)[1:10]
+rownames(tumorCells_surfaceGenes_binaryExpr)[1:10]
+tumorCells_surfaceGenes_negated <- tumorCells_surfaceGenes_counts == 0
+tumorCells_surfaceGenes_negated_sparse <- as(tumorCells_surfaceGenes_negated, "CsparseMatrix")
+rownames(tumorCells_surfaceGenes_negated) = paste0(rownames(tumorCells_surfaceGenes_negated), "_not")
+rownames(tumorCells_surfaceGenes_negated_sparse) = paste0(rownames(tumorCells_surfaceGenes_negated_sparse), "_not")
+
+combined_matrix <- rbind(tumorCells_surfaceGenes_binaryExpr, tumorCells_surfaceGenes_negated)
+combined_matrix2 <- rbind(tumorCells_surfaceGenes_binaryExpr, tumorCells_surfaceGenes_negated_sparse)
+class(combined_matrix)
+class(combined_matrix2)
+combined_matrix = t(combined_matrix)
+combined_matrix2 = t(combined_matrix2)
+
+# clinical_targets
+# Comptutional_CAR_bulk
+# Comptutional_CAR_sc
+# logiCAR_combos
+
+clinical_targets_expr = combined_matrix[, clinical_targets]
+# Measure time with system.time()
+timing <- system.time({
+  Comptutional_CAR_bulk_expr1 <- calcEquivalentExpression(Comptutional_CAR_bulk, combined_matrix)
+})
+# Print timing results
+print(timing)
+
+timing2 <- system.time({
+  Comptutional_CAR_bulk_expr2 <- calcEquivalentExpression2(Comptutional_CAR_bulk, combined_matrix)
+})
+# Print timing results
+print(timing2)
+
+
+timing3 <- system.time({
+  Comptutional_CAR_bulk_expr3 <- calcEquivalentExpression(Comptutional_CAR_bulk, combined_matrix2)
+})
+# Print timing results
+print(timing3)
+
+#subset_matrix <- combined_matrix2[1:5000, , drop = FALSE]
+logiCAR_combos = c('PTPRK | KIAA1324 | CA12',
+                   'GABRP | KIAA1324 | TACSTD2',
+                   'GABRP | KIAA1324 | PRLR', # safety >0.9
+                   #'(IRAG1_not & PTPRF) | KIAA1324', 
+                   '((SLC39A6 | GABRP) & ACKR4_not) | (KIAA1324 | BAMBI)',
+                   "CD24 | SPINT2",
+                    "FAP & EPHA2_not", "FAP & MET_not",  
+                    "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", 
+                    "EPHB3 & FZD5_not", "ADAM12 & GPC3_not", 
+                    "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", 
+                    "FLVCR1 & TRHDE_not", "EPHB3 & SLC16A7_not", 
+                    "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", 
+                    "LDLRAD3 & SSTR1_not"
+                   )
+timing4 <- system.time({
+  Comptutional_CAR_bulk_expr4 <- calcEquivalentExpression2(logiCAR_combos, combined_matrix2)
+  #Comptutional_CAR_bulk_expr4 <- calcEquivalentExpression2(logiCAR_combos, subset_matrix)
+})
+# Print timing results
+print(timing4)
+means_list <- lapply(Comptutional_CAR_bulk_expr4, mean)
+sorted_list <- means_list[order(unlist(means_list))]
+print(sorted_list)
+
+```
+
+# safety landscape of clinical targets (for all solid tumors), computational targets (sc + bulk), and newly identified targets
+```{r}
+
+```
+
+
+#  (not used!!) calculate efficacy and safety of N-gene CARs (N = 1,2,3,4,5) on full data of tumor cells and HPA normal cells (use all cells)
+```{r}
+
+####################### ####################### ####################### ####################### ####################### 
+####################### process single cell data, extract gene expression of unique_CARtargets_measured
+####################### ####################### ####################### ####################### ####################### 
+
+
+
+#### process tumor data (in-house datasets External)
+### Stefan
+geneExpr_mat_Stefan_CARs = geneExpr_mat_Stefan[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_Stefan_CARs <- t(geneExpr_mat_Stefan_CARs)
+colnames(geneExpr_mat_Stefan_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_Stefan_CARs_negated <- (geneExpr_mat_Stefan_CARs == 0)*1
+geneExpr_mat_Stefan_CARs_negated <- Matrix(geneExpr_mat_Stefan_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_Stefan_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_Stefan_CARs_negated[1:5,1:5]
+
+geneExpr_mat_Stefan_CARs_final_matrix <- cbind(geneExpr_mat_Stefan_CARs, geneExpr_mat_Stefan_CARs_negated)
+dim(geneExpr_mat_Stefan_CARs_final_matrix)
+geneExpr_mat_Stefan_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_Stefan_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_Stefan_CARs_final_matrix))
+
+### GSE246613
+geneExpr_mat_GSE246613_CARs = geneExpr_mat_GSE246613[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_GSE246613_CARs <- t(geneExpr_mat_GSE246613_CARs)
+colnames(geneExpr_mat_GSE246613_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_GSE246613_CARs_negated <- (geneExpr_mat_GSE246613_CARs == 0)*1
+geneExpr_mat_GSE246613_CARs_negated <- Matrix(geneExpr_mat_GSE246613_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_GSE246613_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_GSE246613_CARs_negated[1:5,1:5]
+
+geneExpr_mat_GSE246613_CARs_final_matrix <- cbind(geneExpr_mat_GSE246613_CARs, geneExpr_mat_GSE246613_CARs_negated)
+dim(geneExpr_mat_GSE246613_CARs_final_matrix)
+geneExpr_mat_GSE246613_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_GSE246613_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_GSE246613_CARs_final_matrix))
+
+
+############ process HPA RNA data
+data_HPA_df_onlyData = seu_HPA_RNA_counts_matrix[unique_CARtargets_measured, , drop = F]
+data_HPA_df_onlyData <- t(data_HPA_df_onlyData > 0)
+colnames(data_HPA_df_onlyData) <- unique_CARtargets_measured
+
+data_HPA_df_onlyData_negated <- data_HPA_df_onlyData == 0
+data_HPA_df_onlyData_negated <- as(data_HPA_df_onlyData_negated, "CsparseMatrix")
+colnames(data_HPA_df_onlyData_negated) = paste0(unique_CARtargets_measured, "_not")
+
+data_HPA_final_matrix <- cbind(data_HPA_df_onlyData, data_HPA_df_onlyData_negated)
+dim(data_HPA_final_matrix)
+data_HPA_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_HPA_final_matrix) = gsub("-", "_", colnames(data_HPA_final_matrix))
+max(data_HPA_final_matrix)
+dim(data_HPA_final_matrix)
+
+
+# efficacy RNA
+efficacy_res_list <- calcEquivalentExpression2(filtered_targets_vec, geneExpr_mat_GSE246613_CARs_final_matrix) 
+# first para: targets_vec unique_genes_in_HPAprotein filtered_targets_vec unique_clinical_targets_measured
+# second para: tumor_15public_final_matrix geneExpr_mat_GSE246613_CARs_final_matrix geneExpr_mat_Stefan_CARs_final_matrix
+length(efficacy_res_list)
+length(efficacy_res_list[[1]])
+
+# safety RNA
+safety_res_list <- calcEquivalentExpression2(filtered_targets_vec, data_HPA_final_matrix) # targets_vec unique_genes_in_HPAprotein filtered_targets_vec
+length(safety_res_list)
+length(safety_res_list[[1]])
+
+result_df = data.frame(Efficay = as.numeric(),
+                       Safety = as.numeric()
+                       )
+# Loop through the names in safety_res_list
+for (le in names(safety_res_list)) {
+  # Calculate Efficacy and Safety
+  Efficacy <- mean(efficacy_res_list[[le]])
+  Safety <- 1 - mean(safety_res_list[[le]])
+  # Append the results as a new row to the data frame
+  result_df <- rbind(result_df, data.frame(Efficacy = Efficacy, Safety = Safety))
+}
+rownames(result_df) = names(safety_res_list)
+result_df = result_df[order(-result_df$Efficacy), ]
+result_df2 = result_df[order(result_df$Safety), ]
+print(result_df, width = 200)
+
+
+
+```
+
+
+# (not used!!) Figure 2-d. calculate efficacy and safety of N-gene CARs (N = 1,2,3,4,5) on full external data (Stefan, Simon) of tumor cells and T.S. normal cells (use all cells)
+```{r}
+
+####################### ####################### ####################### ####################### ####################### 
+####################### process single cell data, extract gene expression of unique_CARtargets_measured
+####################### ####################### ####################### ####################### ####################### 
+
+#### process tumor data (public datasets Discovery)
+tumor_15public_mat <- t(tumor_15public_mat > 0)
+dim(tumor_15public_mat)
+tumor_15public_mat[1:5,1:5]
+tumor_15public_mat_negated <- tumor_15public_mat == 0
+tumor_15public_mat_negated <- as(tumor_15public_mat_negated, "CsparseMatrix")
+colnames(tumor_15public_mat_negated) = paste0(geneNAs, "_not")
+tumor_15public_mat_negated[1:5,1:5]
+tumor_15public_final_matrix <- cbind(tumor_15public_mat, tumor_15public_mat_negated)
+dim(tumor_15public_final_matrix)
+tumor_15public_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(tumor_15public_final_matrix) = gsub("-", "_", colnames(tumor_15public_final_matrix))
+
+
+#### process tumor data (in-house datasets External)
+### Stefan
+geneExpr_mat_Stefan_CARs = geneExpr_mat_Stefan[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_Stefan_CARs <- t(geneExpr_mat_Stefan_CARs)
+colnames(geneExpr_mat_Stefan_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_Stefan_CARs_negated <- (geneExpr_mat_Stefan_CARs == 0)*1
+geneExpr_mat_Stefan_CARs_negated <- Matrix(geneExpr_mat_Stefan_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_Stefan_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_Stefan_CARs_negated[1:5,1:5]
+
+geneExpr_mat_Stefan_CARs_final_matrix <- cbind(geneExpr_mat_Stefan_CARs, geneExpr_mat_Stefan_CARs_negated)
+dim(geneExpr_mat_Stefan_CARs_final_matrix)
+geneExpr_mat_Stefan_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_Stefan_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_Stefan_CARs_final_matrix))
+
+### GSE246613
+geneExpr_mat_GSE246613_CARs = geneExpr_mat_GSE246613[unique_CARtargets_measured, , drop = F]
+geneExpr_mat_GSE246613_CARs <- t(geneExpr_mat_GSE246613_CARs)
+colnames(geneExpr_mat_GSE246613_CARs) <- unique_CARtargets_measured
+
+geneExpr_mat_GSE246613_CARs_negated <- (geneExpr_mat_GSE246613_CARs == 0)*1
+geneExpr_mat_GSE246613_CARs_negated <- Matrix(geneExpr_mat_GSE246613_CARs_negated, sparse = TRUE)
+colnames(geneExpr_mat_GSE246613_CARs_negated) = paste0(unique_CARtargets_measured, "_not")
+geneExpr_mat_GSE246613_CARs_negated[1:5,1:5]
+
+geneExpr_mat_GSE246613_CARs_final_matrix <- cbind(geneExpr_mat_GSE246613_CARs, geneExpr_mat_GSE246613_CARs_negated)
+dim(geneExpr_mat_GSE246613_CARs_final_matrix)
+geneExpr_mat_GSE246613_CARs_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(geneExpr_mat_GSE246613_CARs_final_matrix) = gsub("-", "_", colnames(geneExpr_mat_GSE246613_CARs_final_matrix))
+
+
+############ process HPA RNA data
+data_HPA_df_onlyData = seu_HPA_RNA_counts_matrix[unique_CARtargets_measured, , drop = F]
+data_HPA_df_onlyData <- t(data_HPA_df_onlyData > 0)
+colnames(data_HPA_df_onlyData) <- unique_CARtargets_measured
+
+data_HPA_df_onlyData_negated <- data_HPA_df_onlyData == 0
+data_HPA_df_onlyData_negated <- as(data_HPA_df_onlyData_negated, "CsparseMatrix")
+colnames(data_HPA_df_onlyData_negated) = paste0(unique_CARtargets_measured, "_not")
+
+data_HPA_final_matrix <- cbind(data_HPA_df_onlyData, data_HPA_df_onlyData_negated)
+dim(data_HPA_final_matrix)
+data_HPA_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_HPA_final_matrix) = gsub("-", "_", colnames(data_HPA_final_matrix))
+max(data_HPA_final_matrix)
+dim(data_HPA_final_matrix)
+
+
+# efficacy RNA
+efficacy_res_list <- calcEquivalentExpression2(filtered_targets_vec, geneExpr_mat_GSE246613_CARs_final_matrix) 
+# first para: targets_vec unique_genes_in_HPAprotein filtered_targets_vec unique_clinical_targets_measured
+# second para: tumor_15public_final_matrix geneExpr_mat_GSE246613_CARs_final_matrix geneExpr_mat_Stefan_CARs_final_matrix
+length(efficacy_res_list)
+length(efficacy_res_list[[1]])
+
+# safety RNA
+safety_res_list <- calcEquivalentExpression2(filtered_targets_vec, data_HPA_final_matrix) # targets_vec unique_genes_in_HPAprotein filtered_targets_vec
+length(safety_res_list)
+length(safety_res_list[[1]])
+
+result_df = data.frame(Efficay = as.numeric(),
+                       Safety = as.numeric()
+                       )
+# Loop through the names in safety_res_list
+for (le in names(safety_res_list)) {
+  # Calculate Efficacy and Safety
+  Efficacy <- mean(efficacy_res_list[[le]])
+  Safety <- 1 - mean(safety_res_list[[le]])
+  # Append the results as a new row to the data frame
+  result_df <- rbind(result_df, data.frame(Efficacy = Efficacy, Safety = Safety))
+}
+rownames(result_df) = names(safety_res_list)
+result_df = result_df[order(-result_df$Efficacy), ]
+result_df2 = result_df[order(result_df$Safety), ]
+print(result_df, width = 200)
+
+
+
+```

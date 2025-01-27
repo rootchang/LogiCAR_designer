@@ -1,0 +1,876 @@
+---
+title: "Design paitent-specific logic-gated CARs for precision oncology"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+#install.packages("showtext")
+library(showtext) # this package enables R to show special characters like ≤
+# Add a font and enable `showtext`
+font_add(family = "Arial", regular = "path/to/arial.ttf")  # Replace with the path to your Arial font file
+showtext_auto()
+
+```
+
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
+surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+surface_genes = read.csv(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+# Define custom colors for each group
+group_colors <- c(
+  "Patient-specific LogiCAR (N ≤ 3)" = "#08306b",  # Deep blue
+  "General LogiCAR (N ≤ 3)" = "#2171b5",  # Dark blue
+  "Kwon et al." = "#006d2c",      # Deep green
+  "Dannenfelser et al." = "#41ab5d",  # Light green
+  "Clinical (BRCA)" = "#cb181d",  # Deep red
+  "Clinical (other tumors)" = "#fb6a4a"  # Light red (pink)
+)
+
+```
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+# (Run for once only!) make data for three patients (seurat objects)
+```{r}
+
+fig_dir <- "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/"
+
+### Bassez CohortA (patient: BIOKEY_10)
+dataset_name = 'Bassez_2021_NatMed'
+file_prefix = "seu_Tissue"
+data_dir <- paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/", dataset_name, "/CohortA/")
+processed_dir <- paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/", dataset_name, "/CohortA/")
+seurat_obj = readRDS(file = paste0(processed_dir,file_prefix,".rds"))
+colnames(seurat_obj@meta.data)
+unique(seurat_obj$patient_id)
+unique(seurat_obj$cellType)
+seurat_Bassez_CohortA_sub = subset(seurat_obj, subset = patient_id %in% c("BIOKEY_10"))
+seurat_Bassez_CohortA_sub = subset(seurat_Bassez_CohortA_sub, subset = cellType %in% c("Cancer_cell"))
+dim(seurat_Bassez_CohortA_sub) # 25288  3139
+
+# Normalize the data
+seurat_Bassez_CohortA_sub <- NormalizeData(seurat_Bassez_CohortA_sub) # log(x/sum(x)*10000+1)
+seurat_Bassez_CohortA_sub <- FindVariableFeatures(seurat_Bassez_CohortA_sub)
+seurat_Bassez_CohortA_sub <- ScaleData(seurat_Bassez_CohortA_sub) # pbmc <- SCTransform(pbmc, vars.to.regress = "CC.Difference")
+seurat_Bassez_CohortA_sub <- RunPCA(seurat_Bassez_CohortA_sub, pc.genes = seurat_Bassez_CohortA_sub@var.genes)
+seurat_Bassez_CohortA_sub <- RunUMAP(seurat_Bassez_CohortA_sub, reduction = "pca", dims = 1:10) 
+seurat_Bassez_CohortA_sub <- FindNeighbors(seurat_Bassez_CohortA_sub, reduction = "pca", dims = 1:10) 
+seurat_Bassez_CohortA_sub <- FindClusters(seurat_Bassez_CohortA_sub, resolution = 0.5) # 
+
+saveRDS(seurat_Bassez_CohortA_sub, file = paste0(processed_dir,"Bassez_CohortA_BIOKEY_10_tumorCells.rds"))
+
+
+
+### GSE246613 (Patient11)
+dataset_name = 'GSE246613'
+file_prefix = "seu_Tissue"
+data_dir <- paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/", dataset_name, "/")
+processed_dir <- paste0("/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/", dataset_name, "/")
+seurat_obj = readRDS(file = paste0(processed_dir,"GSE246613_seu_Tissue.rds"))
+colnames(seurat_obj@meta.data)
+unique(seurat_obj$PatientID)
+unique(seurat_obj$celltype_all)
+seurat_GSE246613_sub = subset(seurat_obj, subset = PatientID %in% c("Patient11"))
+seurat_GSE246613_sub = subset(seurat_GSE246613_sub, subset = celltype_all %in% c("Tumor"))
+dim(seurat_GSE246613_sub) # 36601  1087
+
+# Normalize the data
+seurat_GSE246613_sub <- NormalizeData(seurat_GSE246613_sub) # log(x/sum(x)*10000+1)
+seurat_GSE246613_sub <- FindVariableFeatures(seurat_GSE246613_sub)
+seurat_GSE246613_sub <- ScaleData(seurat_GSE246613_sub) # pbmc <- SCTransform(pbmc, vars.to.regress = "CC.Difference")
+seurat_GSE246613_sub <- RunPCA(seurat_GSE246613_sub, pc.genes = seurat_GSE246613_sub@var.genes)
+seurat_GSE246613_sub <- RunUMAP(seurat_GSE246613_sub, reduction = "pca", dims = 1:10) 
+seurat_GSE246613_sub <- FindNeighbors(seurat_GSE246613_sub, reduction = "pca", dims = 1:10) 
+seurat_GSE246613_sub <- FindClusters(seurat_GSE246613_sub, resolution = 0.5) # 
+
+saveRDS(seurat_GSE246613_sub, file = paste0(processed_dir,"GSE246613_Patient11_tumorCells.rds"))
+
+```
+
+# load data for three patients (seurat objects)
+```{r}
+
+# /Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/GSE246613
+
+dataset_name = 'Bassez_2021_NatMed'
+processed_dir <- paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/", dataset_name, "/CohortA/")
+seurat_Bassez_sub = readRDS(file = paste0(processed_dir,"Bassez_CohortA_BIOKEY_10_tumorCells.rds"))
+
+dataset_name = 'GSE246613'
+processed_dir <- paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/", dataset_name, "/")
+seurat_GSE246613_sub = readRDS(file = paste0(processed_dir,"GSE246613_Patient11_tumorCells.rds"))
+
+
+```
+
+# Figure 4ABC (top). UMAP for three patients 
+```{r}
+
+# seurat_Bassez_sub UMAP_Bassez_CohortA_BIOKEY_10_tumorCells.pdf
+# seurat_Stefan_sub UMAP_Stefan_AA_3_tumorCells.pdf
+# seurat_GSE246613_sub UMAP_GSE246613_Patient11_tumorCells.pdf
+
+DimPlot(
+  seurat_Bassez_sub,
+  group.by = "seurat_clusters",  # Do not group by any metadata
+  label = FALSE,   # Remove labels for groups
+  repel = TRUE,    # Adjust labels to avoid overlap if present
+  raster = FALSE   # Higher quality plot without rasterization
+) +
+  #scale_color_manual(values = c("black")) + # Optional: custom colors
+  ggtitle("") +                          # Optional: remove the title
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) + 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) # + 
+  #NoLegend()                             # Optional: remove the legend
+ggsave(
+  filename = paste0(fig_dir, "UMAP_Bassez_CohortA_BIOKEY_10_tumorCells.pdf"), # Change file extension to .pdf
+  height = 90, 
+  width = 90, 
+  units = "mm", # Ensure units are in mm
+  device = "pdf" # Specify PDF as the output device
+)
+
+
+```
+
+
+# (run for once only!) read in and process top N-gene logic-gated CARs identified by LogiCAR Designer to standard format
+```{r}
+
+patients_prefix = c("GSE161529_patient0135_allTumorCells", "Bassez_CohortA_BIOKEY_10_allTumorCells", "GSE246613_Patient11_allTumorCells")
+top_logiCARs_files_suffix = c("singlets", "doublets_merged", "triplets_merged")
+keep_topN = 15
+
+top_logiCARs_summary_list = list()
+for (pp in patients_prefix){
+  print(paste(pp, "in processing ..."))
+  top_logiCARs_data_dir = paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/", pp, "/")
+  
+  ### extract top solutions with considering duplications (with N-1 genes the same)
+  top_logiCARs_summary_df = data.frame()
+  top_logiCARs_uniqueGenes = c()
+  for (fn in top_logiCARs_files_suffix) {
+    print(paste("  ", fn, "in processing ..."))
+    top_logiCARs_df = read.csv(file = paste0(top_logiCARs_data_dir, pp, "_optimal_",fn,".txt"), sep = "\t", header = T)
+    top_logiCARs_dt = as.data.table(top_logiCARs_df)
+    # Remove brackets and split genes into a vector
+    top_logiCARs_dt$Genes <- str_replace_all(top_logiCARs_dt$Genes, "\\[|\\]|\\'", "")
+    top_logiCARs_dt[, GenesSplit := strsplit(Genes, ", ")]
+    current_list = list()
+    current_list[[1]] <- list(top_logiCARs_dt$GenesSplit[[1]], round(top_logiCARs_dt$Score[[1]],2), top_logiCARs_dt$LogicGates[[1]])
+    current_list_len = 1
+    for (row_i in 2:nrow(top_logiCARs_dt)){
+      flag = 1
+      Score_temp = round(top_logiCARs_dt$Score[[row_i]],2)
+      if (fn != "singlets"){
+        for (item_j in 1:current_list_len){
+          diff_num = length(setdiff(current_list[[item_j]][[1]], top_logiCARs_dt$GenesSplit[[row_i]]))
+          if ((diff_num < 2) & (Score_temp == current_list[[item_j]][[2]])){
+            flag = 0
+            break
+          }
+        }
+      }
+      if (flag == 1){
+        current_list[[current_list_len+1]] <- list(top_logiCARs_dt$GenesSplit[[row_i]], Score_temp, top_logiCARs_dt$LogicGates[[row_i]])
+        current_list_len = current_list_len + 1
+        if (current_list_len == keep_topN){
+          break
+        }
+      }
+    }
+    rows_used = row_i
+    print(paste("  ", fn, rows_used))
+    #print(current_list)
+    # Apply the conversion function to the data to get standard representation of logiCARs
+    top_logiCARs_dt[, LogiCARs := mapply(convert_logic, LogicGates, Genes)]
+    
+    unique_genes <- unique(unlist(top_logiCARs_dt$GenesSplit[1:rows_used]))
+    unique_genes <- gsub("_not", "", unique_genes)
+    result_df_temp <- top_logiCARs_dt[1:rows_used, c("Genes", "LogiCARs", "Score", "GenesSplit")]
+    geneNum = length(top_logiCARs_dt$GenesSplit[[1]])
+    result_df_temp$geneNum = geneNum
+    top_logiCARs_summary_df = rbind(top_logiCARs_summary_df, result_df_temp)
+    top_logiCARs_uniqueGenes = unique(c(top_logiCARs_uniqueGenes, unique_genes))
+    #print(current_list)
+  }
+  
+  ## convert - in gene names to _
+  top_logiCARs_summary_df$LogiCARs = gsub("-", "_", top_logiCARs_summary_df$LogiCARs)
+  top_logiCARs_summary_list[[pp]] = top_logiCARs_summary_df
+}
+
+# Print the results
+dim(top_logiCARs_summary_df)
+length(top_logiCARs_uniqueGenes)
+
+```
+
+# (run for once only! ) load and process sampled normal cell RNA expression data (the LogiCAR Designer input)
+```{r}
+
+####### load HPA RNA Discovery data  31000 cells *  5448/2 genes
+data_HPA_RNA = fread(file = paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/HPA/version24_20241022/rna/HPA_LogiCAR_cell_surface_genes_wgene_and_clinical.txt"), sep = "\t", header = F) 
+data_HPA_RNA[1:5,1:5]
+data_HPA_RNA_onlyData = data_HPA_RNA[3:nrow(data_HPA_RNA),,drop=F]
+data_HPA_RNA_onlyData[1:5,1:5]
+data_HPA_RNA_geneNAs = data_HPA_RNA_onlyData$V1
+data_HPA_RNA_onlyData$V1 = NULL
+
+# Step 1: Convert the data.table to a numeric matrix
+data_HPA_RNA_onlyData <- as.matrix(data_HPA_RNA_onlyData)
+rownames(data_HPA_RNA_onlyData) <- data_HPA_RNA_geneNAs
+data_HPA_RNA_onlyData <- apply(data_HPA_RNA_onlyData, 2, as.numeric)  # Convert to numeric
+# Step 2: Convert the numeric matrix to a sparse matrix
+data_HPA_RNA_onlyData <- Matrix(data_HPA_RNA_onlyData, sparse = TRUE)
+# Step 3: Transpose the sparse matrix
+data_HPA_RNA_onlyData <- t(data_HPA_RNA_onlyData)
+dim(data_HPA_RNA_onlyData)
+colnames(data_HPA_RNA_onlyData) <- data_HPA_RNA_geneNAs
+data_HPA_RNA_onlyData_negated <- data_HPA_RNA_onlyData == 0
+data_HPA_RNA_onlyData_negated <- as(data_HPA_RNA_onlyData_negated, "CsparseMatrix")
+colnames(data_HPA_RNA_onlyData_negated) = paste0(data_HPA_RNA_geneNAs, "_not")
+data_HPA_RNA_final_matrix <- cbind(data_HPA_RNA_onlyData, data_HPA_RNA_onlyData_negated)
+dim(data_HPA_RNA_final_matrix)
+data_HPA_RNA_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(data_HPA_RNA_final_matrix) = gsub("-", "_", colnames(data_HPA_RNA_final_matrix))
+
+
+```
+
+# load and process tumor cell RNA expression data (the LogiCAR Designer input)
+```{r}
+
+####### load and process sampled tumor cell RNA expression data (the LogiCAR Designer input)
+# server
+data_dir = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/"
+processed_dir <- data_dir
+# local
+data_dir = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/"
+processed_dir <- data_dir
+
+#### Bassez_CohortA_BIOKEY_10
+dataset_name = "Bassez_2021_NatMed/CohortA/"
+file_path <- paste0(processed_dir, dataset_name, "Bassez_2021_NatMed_CohortA_BIOKEY_10_LogiCAR_wgene_and_clinical.txt")
+LogiCAR_input_df <- fread(file_path, sep = "\t", header = FALSE, data.table = FALSE, check.names = FALSE)
+LogiCAR_input_df[1:5,1:5]
+class(LogiCAR_input_df)
+# Remove the first column and first three rows
+numeric_data <- LogiCAR_input_df[-(1:3), -1]
+# Convert the numeric matrix to a sparse matrix
+numeric_matrix <- as.matrix(apply(numeric_data, 2, as.numeric))
+Bassez_CohortA_BIOKEY_10_Smat <- Matrix(numeric_matrix, sparse = TRUE)
+dim(Bassez_CohortA_BIOKEY_10_Smat)
+geneNAs_temp <- LogiCAR_input_df$V1[4:nrow(LogiCAR_input_df)]
+Bassez_CohortA_BIOKEY_10_Smat[1:5,1:5]
+sum(Bassez_CohortA_BIOKEY_10_Smat>0)/length(Bassez_CohortA_BIOKEY_10_Smat) # 0.0415483
+Bassez_CohortA_BIOKEY_10_Smat <- t(Bassez_CohortA_BIOKEY_10_Smat)
+colnames(Bassez_CohortA_BIOKEY_10_Smat) <- geneNAs_temp
+Bassez_CohortA_BIOKEY_10_Smat_negated <- Bassez_CohortA_BIOKEY_10_Smat == 0
+Bassez_CohortA_BIOKEY_10_Smat_negated <- as(Bassez_CohortA_BIOKEY_10_Smat_negated, "CsparseMatrix")
+colnames(Bassez_CohortA_BIOKEY_10_Smat_negated) = paste0(geneNAs_temp, "_not")
+Bassez_CohortA_BIOKEY_10_final_matrix <- cbind(Bassez_CohortA_BIOKEY_10_Smat, Bassez_CohortA_BIOKEY_10_Smat_negated)
+dim(Bassez_CohortA_BIOKEY_10_final_matrix)
+Bassez_CohortA_BIOKEY_10_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(Bassez_CohortA_BIOKEY_10_final_matrix) = gsub("-", "_", colnames(Bassez_CohortA_BIOKEY_10_final_matrix))
+
+
+#### GSE161529_patient0135
+dataset_name = "GSE161529_patient0135"
+file_path <- paste0(processed_dir, dataset_name, "_allTumorCells_LogiCAR_wgene_and_clinical.txt")
+LogiCAR_input_df <- fread(file_path, sep = "\t", header = FALSE, data.table = FALSE, check.names = FALSE)
+LogiCAR_input_df[1:5,1:5]
+class(LogiCAR_input_df)
+# Remove the first column and first three rows
+numeric_data <- LogiCAR_input_df[-(1:3), -1]
+# Convert the numeric matrix to a sparse matrix
+numeric_matrix <- as.matrix(apply(numeric_data, 2, as.numeric))
+GSE161529_patient0135_Smat <- Matrix(numeric_matrix, sparse = TRUE)
+dim(GSE161529_patient0135_Smat)
+geneNAs_temp <- LogiCAR_input_df$V1[4:nrow(LogiCAR_input_df)]
+GSE161529_patient0135_Smat[1:5,1:5]
+sum(GSE161529_patient0135_Smat>0)/length(GSE161529_patient0135_Smat) # 0.0415483
+GSE161529_patient0135_Smat <- t(GSE161529_patient0135_Smat)
+colnames(GSE161529_patient0135_Smat) <- geneNAs_temp
+GSE161529_patient0135_Smat_negated <- GSE161529_patient0135_Smat == 0
+GSE161529_patient0135_Smat_negated <- as(GSE161529_patient0135_Smat_negated, "CsparseMatrix")
+colnames(GSE161529_patient0135_Smat_negated) = paste0(geneNAs_temp, "_not")
+GSE161529_patient0135_final_matrix <- cbind(GSE161529_patient0135_Smat, GSE161529_patient0135_Smat_negated)
+dim(GSE161529_patient0135_final_matrix)
+GSE161529_patient0135_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(GSE161529_patient0135_final_matrix) = gsub("-", "_", colnames(GSE161529_patient0135_final_matrix))
+
+
+#### GSE246613_Patient11
+dataset_name = "GSE246613_Patient11"
+file_path <- paste0(processed_dir, "GSE246613/", dataset_name, "_LogiCAR_wgene_and_clinical.txt")
+LogiCAR_input_df <- fread(file_path, sep = "\t", header = FALSE, data.table = FALSE, check.names = FALSE)
+LogiCAR_input_df[1:5,1:5]
+class(LogiCAR_input_df)
+# Remove the first column and first three rows
+numeric_data <- LogiCAR_input_df[-(1:3), -1]
+# Convert the numeric matrix to a sparse matrix
+numeric_matrix <- as.matrix(apply(numeric_data, 2, as.numeric))
+GSE246613_Patient11_Smat <- Matrix(numeric_matrix, sparse = TRUE)
+dim(GSE246613_Patient11_Smat)
+geneNAs_temp <- LogiCAR_input_df$V1[4:nrow(LogiCAR_input_df)]
+GSE246613_Patient11_Smat[1:5,1:5]
+sum(GSE246613_Patient11_Smat>0)/length(GSE246613_Patient11_Smat) # 0.0415483
+GSE246613_Patient11_Smat <- t(GSE246613_Patient11_Smat)
+colnames(GSE246613_Patient11_Smat) <- geneNAs_temp
+GSE246613_Patient11_Smat_negated <- GSE246613_Patient11_Smat == 0
+GSE246613_Patient11_Smat_negated <- as(GSE246613_Patient11_Smat_negated, "CsparseMatrix")
+colnames(GSE246613_Patient11_Smat_negated) = paste0(geneNAs_temp, "_not")
+GSE246613_Patient11_final_matrix <- cbind(GSE246613_Patient11_Smat, GSE246613_Patient11_Smat_negated)
+dim(GSE246613_Patient11_final_matrix)
+GSE246613_Patient11_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(GSE246613_Patient11_final_matrix) = gsub("-", "_", colnames(GSE246613_Patient11_final_matrix))
+
+
+```
+
+
+# (run for once only!) filtering top N-gene logic-gated CARs identified by LogiCAR Designer by safety
+# filter identified top logiCARs by safety (for same efficacy and N-1 same gene logiCARs, only keep one highest safety)
+```{r}
+
+### function to filter LogiCARs to keep top N non-redundant targets
+has_n_minus_1_common_genes <- function(genes1, genes2) {
+  diff_genes <- setdiff(genes1, genes2)
+  return((length(diff_genes) <2) & length(genes1) > 1)
+}
+
+### run the three patients one by one.
+data_tumor_final_matrix_list = list(Bassez_CohortA_BIOKEY_10_allTumorCells = Bassez_CohortA_BIOKEY_10_final_matrix,
+                                    GSE161529_patient0135_allTumorCells = GSE161529_patient0135_final_matrix,
+                                    GSE246613_Patient11_allTumorCells = GSE246613_Patient11_final_matrix)
+
+filtered_top_logiCARs_list = list()
+for (pp in names(top_logiCARs_summary_list)){
+  print(paste(pp, "in processing ..."))
+  top_logiCARs_summary_df <- top_logiCARs_summary_list[[pp]]
+  
+  # efficacy RNA
+  efficacy_res_list <- calcEquivalentExpression2(top_logiCARs_summary_df$LogiCARs, data_tumor_final_matrix_list[[pp]]) 
+  # safety RNA
+  safety_res_list <- calcEquivalentExpression2(top_logiCARs_summary_df$LogiCARs, data_HPA_RNA_final_matrix) 
+  
+  result_df = data.frame(LogiCARs = as.character(),
+                         Efficay = as.numeric(),
+                         Safety = as.numeric()
+                         )
+  # Loop through the names in safety_res_list
+  for (le in names(safety_res_list)) {
+    # Calculate Efficacy and Safety
+    Efficacy <- mean(efficacy_res_list[[le]])
+    Safety <- 1 - mean(safety_res_list[[le]])
+    # Append the results as a new row to the data frame
+    result_df <- rbind(result_df, data.frame(LogiCARs = le, Efficacy = Efficacy, Safety = Safety))
+  }
+  
+  top_logiCARs_summary_df_scored = merge(top_logiCARs_summary_df, result_df, by = "LogiCARs")
+  
+  ### confirm that Score = Efficacy
+  #plot(top_logiCARs_summary_df_scored$Score, top_logiCARs_summary_df_scored$Efficacy)
+  
+  # Reduce the resolution of Score
+  top_logiCARs_summary_df_scored[, Score := round(Score, 2)]
+  
+  ## Deduplicate rows by grouping rows with N-1 genes the same and the same Score
+  filtered_rows <- list()
+  for (gene_num in unique(top_logiCARs_summary_df_scored$geneNum)) {
+    group <- top_logiCARs_summary_df_scored[geneNum == gene_num]
+    keep_rows <- !logical(nrow(group)) # all TRUE
+    for (i in 1:(nrow(group)-1)) {
+      if (keep_rows[i]) {
+        for (j in (i + 1):nrow(group)) {
+          if (keep_rows[j] &&
+              group$Score[i] == group$Score[j] &&
+              has_n_minus_1_common_genes(group$GenesSplit[[i]], group$GenesSplit[[j]])) {
+              if (group$Safety[i] >= group$Safety[j]) {
+                keep_rows[j] <- FALSE
+              } else {
+                keep_rows[i] <- FALSE
+                break
+              }
+            }
+          }
+        }
+      }
+    print(paste(gene_num, sum(keep_rows)))
+    filtered_rows[[as.character(gene_num)]] <- group[keep_rows]
+  }
+  
+  filtered_top_logiCARs <- rbindlist(filtered_rows)
+  
+  ## Keep only the top 10 rows per geneNum after deduplication
+  filtered_top_logiCARs <- filtered_top_logiCARs[
+    order(-Score, -Safety),
+    head(.SD, 10),
+    by = geneNum
+  ]
+  
+  filtered_top_logiCARs = filtered_top_logiCARs[order(-filtered_top_logiCARs$Efficacy), ]
+  
+  filtered_top_logiCARs <- filtered_top_logiCARs[
+    order(filtered_top_logiCARs$geneNum, -filtered_top_logiCARs$Efficacy),
+  ]
+  
+  filtered_top_logiCARs_list[[pp]] <- filtered_top_logiCARs
+}
+
+
+save(filtered_top_logiCARs_list, file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/Bassez_CohortA_BIOKEY_10_allTumorCells/filtered_top_logiCARs_v2.RData")
+
+
+```
+
+# load filtered_top_logiCARs_list
+```{r}
+
+load(file = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/Bassez_CohortA_BIOKEY_10_allTumorCells/filtered_top_logiCARs_v2.RData") # filtered_top_logiCARs_list
+
+
+```
+
+
+# extract all candidate CAR targets and genes for comparison
+```{r}
+
+
+clinical_targets = c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "CD80", "CD86", "TNFRSF10B", "FOLR1", "MPP2", "MUC16", "PMEL", "ROR2", "KDR", "EPHA2", "PSCA", "MET", "IL13RA2", "EPCAM", "EGFR", "FOLH1", "GPC3", "ERBB2", "MSLN", "CD276", "TM4SF1", "BSG", "CEACAM5", "ALPP", "GUCY2C", "TACSTD2")
+### (viable) previous computational combinations (exclude combinations with non-surface genes, i.e., genes not in our surface gene list)
+### old
+# Computational_CAR_bulk = c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not",  "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", "FLVCR1 & TRHDE_not", "EPHB3 & SLC16A7_not", "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", "LDLRAD3 & SSTR1_not")
+#### top 10
+Computational_CAR_bulk <- c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & EPHA2_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not", "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not")
+#### top 20
+#Computational_CAR_bulk <- c("FAP & EPHA2_not", "FAP & MET_not", "OR2B6 & EPHA2_not", "OR2B6 & MET_not", "SLC1A4 & SSTR1_not", "ADAM12 & KDR_not", "EPHB3 & FZD5_not", "ADAM12 & GPC3_not", "MUC1 & LYVE1_not", "SLC4A5 & PTH1R_not", "FLVCR1 & TRHDE_not", "EPHB3 & SLC16A7_not", "EPCAM & SSTR1_not", "MUC1 & SLC4A4_not", "TNFRSF18 & SLC16A7_not", "LDLRAD3 & SSTR1_not", "KREMEN2 & KL_not", "KREMEN2 & EPHA2_not", "KREMEN2 & MET_not", "KISS1R & TNFRSF9_not")
+
+### top 5 for AND, OR, NOT gates respectively
+Computational_CAR_sc = c("SLC39A6 & SPINT2", "TACSTD2 & TSPAN13", "CD24 & TM4SF1", "CD9 & SLC39A6", "BCAM & SPINT2",
+                        "BAMBI | PRLR", "NECTIN4 | PRLR", "BAMBI | NECTIN4", "LY6K | PRLR", "PRLR | VTCN1",
+                        "CLDN3 & TSPAN8_not", "SERINC2 & TSPAN8_not", "CLDN3 & PIGR_not", "PLPP2 & MUC4_not", "SERINC2 & PIGR_not"
+                        )
+#other = c("MUC1 | ERBB2", "ERBB4 | PRLR | ELAPOR1", "CLDN3 | ERBB4 | PRLR", "(HLA_E_not | CLDN3) & EMP3_not") # (MUC1 & ERBB2) https://link.springer.com/article/10.1007/s10875-012-9689-9
+other_targets = c()
+
+### only keep top 5 for each N
+for (pp in names(filtered_top_logiCARs_list)){
+  filtered_top_logiCARs <- filtered_top_logiCARs_list[[pp]]
+  filtered_top_logiCARs <- filtered_top_logiCARs[
+    order(-Score, -Safety),
+    head(.SD, 5),
+    by = geneNum
+  ]
+  filtered_top_logiCARs_list[[pp]] <- filtered_top_logiCARs
+}
+
+filtered_targets_df_list <- list()
+for (pp in names(filtered_top_logiCARs_list)){
+  filtered_top_logiCARs <- filtered_top_logiCARs_list[[pp]]
+  logiCAR_combos <- filtered_top_logiCARs$LogiCARs
+  targets_vec <- c(logiCAR_combos, clinical_targets, Computational_CAR_bulk, Computational_CAR_sc, other_targets)
+  logiCAR_combos_df = as.data.frame(filtered_top_logiCARs)[c("LogiCARs", "geneNum")]
+  logiCAR_combos_df$Group = "LogiCAR Designer"
+  Clinical_CARs_df = data.frame(LogiCARs = clinical_targets)
+  Clinical_CARs_df$geneNum = 1
+  Clinical_CARs_df$Group = "Clinical Targets"
+  Computational_CARs_df <- data.frame(LogiCARs = c(Computational_CAR_bulk, Computational_CAR_sc))
+  Computational_CARs_df$geneNum = 2
+  #Computational_CARs_df$Group = "Previous Computational"
+  Computational_CARs_df$Group = c(rep("Previous Computational (bulk)", length(Computational_CAR_bulk)), rep("Previous Computational (sc)", length(Computational_CAR_sc)))
+  Other_CARs_df <- if (length(other_targets) > 0) {
+    data.frame(
+      LogiCARs = other_targets,
+      geneNum = NA,
+      Group = "Other Targets"
+    )
+  } else {
+    data.frame(
+      LogiCARs = character(0),
+      geneNum = numeric(0),
+      Group = character(0)
+    )
+  }
+  targets_df <- rbind(logiCAR_combos_df, Clinical_CARs_df, Computational_CARs_df, Other_CARs_df)
+  
+  ## get unique single genes from above vector
+  cleaned_combos <- gsub("[|&()]", "", targets_vec)  # Remove |, &, (, )
+  cleaned_combos <- gsub("_not", "", cleaned_combos)    # Remove _not
+  all_genes <- unlist(strsplit(cleaned_combos, "\\s+"))
+  unique_genes <- unique(all_genes)
+  unique_CARargets_measured <- intersect(unique_genes, unique_genes) # allGenes_tumor allGenes_measured
+  ## get targets that all genes present in HPA protein measurement
+  # Function to check if all genes in a logic combination are in unique_CARargets_measured
+  is_valid_combo <- function(combo, valid_genes) {
+    # Extract genes from the logic combination
+    genes <- unlist(strsplit(combo, "[|&() ]+"))  # Split by logical operators and spaces
+    genes <- gsub("_not", "", genes)    # Remove _not
+    genes <- genes[genes != ""]  # Remove empty strings
+    # Check if all genes are in valid_genes
+    all(genes %in% valid_genes)
+  }
+  filtered_indices = sapply(targets_vec, is_valid_combo, valid_genes = unique_CARargets_measured)
+  filtered_targets_vec <- targets_vec[filtered_indices]
+  filtered_targets_df <- targets_df[filtered_indices, ]
+  
+  filtered_targets_df_list[[pp]] <- filtered_targets_df
+  
+}
+
+
+
+```
+
+
+# Figure 4ABC. barplot rank BRCA CAR targets based on  efficacy on each patient
+```{r}
+
+### run the three patients one by one.
+data_tumor_final_matrix_list = list(Bassez_CohortA_BIOKEY_10_allTumorCells = Bassez_CohortA_BIOKEY_10_final_matrix,
+                                    GSE161529_patient0135_allTumorCells = GSE161529_patient0135_final_matrix,
+                                    GSE246613_Patient11_allTumorCells = GSE246613_Patient11_final_matrix)
+
+
+patient_in_test = "GSE161529_patient0135" # "Bassez_CohortA_BIOKEY_10", "GSE246613_Patient11", "GSE161529_patient0135"
+name_for_data = "GSE161529_patient0135_allTumorCells" #  "Bassez_CohortA_BIOKEY_10_allTumorCells", "GSE246613_Patient11_allTumorCells" , "GSE161529_patient0135_allTumorCells"
+
+filtered_targets_df <- filtered_targets_df_list[[name_for_data]]
+data_tumor_final_matrix <- data_tumor_final_matrix_list[[name_for_data]]
+### add "general LogiCARs" and remove low-safety "Previous Computational" and "Clinical Targets"
+existing_logiCARs_with_safety = read.csv("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv")
+general_LogiCARs_df <- existing_logiCARs_with_safety[(existing_logiCARs_with_safety$Group == "LogiCAR Designer") & (existing_logiCARs_with_safety$geneNum <= 3), c("LogiCARs", "geneNum", "Group")]
+general_LogiCARs_df$Group <- "general_LogiCARs"
+filtered_targets_df <- rbind(filtered_targets_df, general_LogiCARs_df)
+existing_CARs_indices <- existing_logiCARs_with_safety$Group %in% c("Previous Comptutional (bulk)","Clinical Targets","Previous Comptutional (sc)")
+safe_indices <- existing_logiCARs_with_safety$Safety >= 0.9
+safe_existing_CARs = existing_logiCARs_with_safety$LogiCARs[existing_CARs_indices & safe_indices]
+remove_indices <- (!(filtered_targets_df$LogiCARs %in% safe_existing_CARs)) &(filtered_targets_df$Group %in% c("Previous Comptutional (bulk)","Clinical Targets","Previous Comptutional (sc)"))
+filtered_targets_df <- filtered_targets_df[!remove_indices, ]
+
+## identify duplicated CAR targets in different groups
+duplicated_CARs = names(table(filtered_targets_df$LogiCARs)[table(filtered_targets_df$LogiCARs) > 1])
+filtered_targets_df[filtered_targets_df$LogiCARs %in% duplicated_CARs, ]
+## remove duplicates
+#filtered_targets_df <- filtered_targets_df[!duplicated(filtered_targets_df$LogiCARs), ]
+#filtered_targets_df[filtered_targets_df$LogiCARs %in% duplicated_CARs, ]
+## mark duplicates
+filtered_targets_df$LogiCARs_display <- filtered_targets_df$LogiCARs
+for (cc in duplicated_CARs) {
+  # Find the indices of the current duplicated LogiCARs value
+  indices <- which(filtered_targets_df$LogiCARs == cc)
+  # Add "*", "**", etc., based on the occurrence count
+  for (i in seq_along(indices)) {
+    if (i > 1) {  # Skip the first occurrence
+      filtered_targets_df$LogiCARs_display[indices[i]] <- paste0(cc, strrep("*", i - 1))
+    }
+  }
+}
+
+###For GSE161529; Patient: 0135
+filtered_targets_df[filtered_targets_df$LogiCARs == "(CCR8 | TACSTD2) & EMP2", ] <- c("(ITM2B_not | TACSTD2) & EMP2", 3, "LogiCAR Designer", "(ITM2B_not | TACSTD2) & EMP2")
+###For Bassez CohortA: delete the row that filtered_targets_df$LogiCARs=="ALPP"
+#filtered_targets_df <- filtered_targets_df[filtered_targets_df$LogiCARs != "ALPP", ] # not measured in Bassez CohortA
+
+# efficacy RNA
+efficacy_res_list <- calcEquivalentExpression2(filtered_targets_df$LogiCARs, data_tumor_final_matrix) 
+length(efficacy_res_list)
+length(efficacy_res_list[[1]])
+names(efficacy_res_list) <- filtered_targets_df$LogiCARs_display
+
+
+result_df = data.frame(LogiCARs_display = as.character(),
+  Efficay = as.numeric()
+  )
+# Loop through the names in safety_res_list
+for (le in names(efficacy_res_list)) {
+  Efficacy <- mean(efficacy_res_list[[le]])
+  result_df <- rbind(result_df, data.frame(LogiCARs_display = le, Efficacy = Efficacy))
+}
+result_df$LogiCARs_display = NULL
+
+filtered_targets_result_df = cbind(filtered_targets_df, result_df)
+dim(filtered_targets_result_df)
+
+filtered_targets_result_df1 = filtered_targets_result_df[filtered_targets_result_df$Group != "general_LogiCARs",]
+filtered_targets_result_df2 = filtered_targets_result_df[filtered_targets_result_df$Group == "general_LogiCARs",]
+## Keep only the top 5 rows per geneNum based on Efficacy for general_LogiCARs
+filtered_targets_result_df2 <- filtered_targets_result_df2 %>%
+  filter(Group == "general_LogiCARs") %>%  # Filter rows where Group is "general_LogiCARs"
+  group_by(geneNum) %>%                   # Group by geneNum
+  arrange(desc(Efficacy)) %>%             # Sort by Efficacy in descending order
+  slice_head(n = 5) %>%                   # Select the top 5 rows for each group
+  ungroup()                               # Ungroup the data frame (optional)
+filtered_targets_result_df = rbind(filtered_targets_result_df1, filtered_targets_result_df2)
+
+# To replace _not at the end of words with ! as a prefix 
+filtered_targets_result_df$LogiCARs_display <- gsub(
+  pattern = "\\b(\\w+)_not\\b", 
+  replacement = "!\\1", 
+  filtered_targets_result_df$LogiCARs_display
+)
+## convert _ in gene names to -
+filtered_targets_result_df$LogiCARs_display = gsub("_", "-", filtered_targets_result_df$LogiCARs_display)
+
+write.csv(filtered_targets_result_df, paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/",name_for_data,"/filtered_targets_result_df_v2.csv"), row.names = F, quote = F)
+
+### load from file
+#filtered_targets_result_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/",name_for_data,"/filtered_targets_result_df_v2.csv"))
+
+filtered_targets_result_df$geneNum = NULL
+filtered_targets_result_df$LogiCARs <- filtered_targets_result_df$LogiCARs_display
+
+filtered_targets_result_df$Group[filtered_targets_result_df$Group == "Clinical Targets"] = "Clinical (other tumors)"
+filtered_targets_result_df$Group[filtered_targets_result_df$LogiCARs %in% c("MUC1", "CD274", "PROM1", "CD70", "ROR1", "PSCA", "MET", "EPCAM", "EGFR", "FOLH1", "ERBB2", "MSLN", "CD276", "TACSTD2")] = "Clinical (BRCA)"
+filtered_targets_result_df$Group[filtered_targets_result_df$Group == "LogiCAR Designer"] = "Patient-specific LogiCAR (N \u2264 3)"
+filtered_targets_result_df$Group[filtered_targets_result_df$Group == "Previous Comptutional (bulk)"] = "Dannenfelser et al."
+filtered_targets_result_df$Group[filtered_targets_result_df$Group == "Previous Comptutional (sc)"] = "Kwon et al."
+filtered_targets_result_df$Group[filtered_targets_result_df$Group == "general_LogiCARs"] = "General LogiCAR (N \u2264 3)"
+unique(filtered_targets_result_df$Group)
+
+##### do not compare with general LogiCAR
+filtered_targets_result_df <- filtered_targets_result_df[filtered_targets_result_df$Group != "General LogiCAR (N \u2264 3)", ]
+
+######################## plot barplot of mean efficacy of targets across 17 datasets with errorbars and scatters, 
+# Order by desired Group order and descending Mean_Efficacy within each group
+group_order <- c("Patient-specific LogiCAR (N \u2264 3)", "General LogiCAR (N \u2264 3)", "Kwon et al.", "Dannenfelser et al.", "Clinical (BRCA)", "Clinical (other tumors)")
+filtered_targets_result_df <- filtered_targets_result_df %>%
+  arrange(factor(Group, levels = group_order), desc(Efficacy))
+
+filtered_targets_result_df$Group = factor(filtered_targets_result_df$Group, levels = group_order)
+filtered_targets_result_df$LogiCARs = factor(filtered_targets_result_df$LogiCARs, levels = filtered_targets_result_df$LogiCARs)
+
+# Barplot with scatter points colored by Dataset
+pdf_file <- paste0(fig_dir,paste0("Figure5_efficacy_",patient_in_test,"_ranking_barplot.pdf"))
+fig_width = 9 # 11
+fig_height = 4.5
+fontSize = 1.2
+pdf(pdf_file, onefile=FALSE, width = fig_width,height=fig_height)
+ggplot(filtered_targets_result_df, aes(x = LogiCARs, y = Efficacy * 100, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(
+    title = "",
+    x = "",
+    y = "Efficacy (%)",
+    fill = "Group"   # Remove legend title for fill
+  ) +
+  scale_fill_manual(
+    values = group_colors
+  ) +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color="black"),
+    axis.line.x = element_line(color="black"),
+    axis.ticks.y = element_line(color="black"),
+    axis.ticks.x = element_line(color="black"),
+    axis.text.y = element_text(color="black"),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none", # c(1.1, 0.6) "none" c(0.8, 0.6)
+    legend.text = element_text(family = "Arial"), # Use a Unicode-compatible font: Arial sans
+    plot.margin = margin(5, 5, 5, 5) # margin(5, 200, 5, 5)
+  )
+dev.off()
+
+```
+
+
+
+# Figure 4e. UMAP visualization of coverage of tumor cells by different CARs (in Dataset: GSE161529; Patient: 0135)
+```{r}
+
+### GSE161529 (patient: 0135)
+dataset_name = 'GSE161529'
+file_prefix = "seu_Tissue"
+data_dir <- paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/", dataset_name, "/")
+processed_dir <- data_dir
+
+seurat_obj <- readRDS(file = paste0(processed_dir,"Bassez_CohortA_BIOKEY_10_tumorCells.rds"))
+
+################## Renormalize 
+expression_matrix <- GetAssayData(seurat_obj, layer = "counts")
+surface_expression_matrix <- expression_matrix[rownames(expression_matrix) %in% surface_genes, ]
+seurat_obj_subset <- CreateSeuratObject(counts = surface_expression_matrix, meta.data = seurat_obj@meta.data)
+
+##### renormalization and UMAP based on surface genes
+# seurat_obj_subset <- NormalizeData(seurat_obj_subset) # log(x/sum(x)*10000+1)
+# seurat_obj_subset <- FindVariableFeatures(seurat_obj_subset)
+# seurat_obj_subset <- ScaleData(seurat_obj_subset) # pbmc <- SCTransform(pbmc, vars.to.regress = "CC.Difference")
+# seurat_obj_subset <- RunPCA(seurat_obj_subset, pc.genes = seurat_obj_subset@var.genes)
+# seurat_obj_subset <- RunUMAP(seurat_obj_subset, reduction = "pca", dims = 1:30)
+
+##### renormalization and UMAP based on all potential CAR genes
+# gene_names <- unique(unlist(regmatches(filtered_targets_df_list[["Bassez_CohortA_BIOKEY_10_allTumorCells"]]$LogiCARs, gregexpr("\\b[A-Za-z0-9]+\\b", filtered_targets_df_list[["Bassez_CohortA_BIOKEY_10_allTumorCells"]]$LogiCARs))))
+# gene_names <- c(gene_names, "ITM2B")
+# seurat_obj_subset <- NormalizeData(seurat_obj_subset)
+# seurat_obj_subset <- ScaleData(seurat_obj_subset, features = gene_names)
+# seurat_obj_subset <- RunPCA(seurat_obj_subset, features = gene_names)
+# seurat_obj_subset <- RunUMAP(seurat_obj_subset, dims = 1:5)  # Use the first 10 PCs
+
+
+##### renormalization and UMAP based ONLY on relevant CAR genes (and clinical targets)
+gene_names <- c("FOLR1", "PROM1", "CD276", "NECTIN4", "LDLRAD3", "ITM2B", "TACSTD2", "EMP2")
+#gene_names <- unique(c(gene_names, clinical_targets))
+seurat_obj_subset <- NormalizeData(seurat_obj_subset)
+seurat_obj_subset <- ScaleData(seurat_obj_subset, features = gene_names)
+seurat_obj_subset <- RunPCA(seurat_obj_subset, features = gene_names)
+seurat_obj_subset <- RunUMAP(seurat_obj_subset, dims = 1:3)  # Use the first 10 PCs
+
+
+
+
+expression_data <- GetAssayData(seurat_obj_subset, assay = "RNA", layer = "data")
+
+#seurat_obj_subset$CAR_MSLN <- (expression_data["MSLN", ] > 0)
+seurat_obj_subset$CAR_FOLR1 <- (expression_data["FOLR1", ] > 0)
+seurat_obj_subset$CAR_PROM1 <- (expression_data["PROM1", ] > 0)
+seurat_obj_subset$CAR_CD276 <- (expression_data["CD276", ] > 0)
+#seurat_obj_subset$CAR_CD70 <- (expression_data["CD70", ] > 0)
+seurat_obj_subset$CAR_NECTIN4 <- (expression_data["NECTIN4", ] > 0)
+seurat_obj_subset$CAR_LDLRAD3 <- (expression_data["LDLRAD3", ] > 0)
+
+# seurat_obj_subset$CAR_EMP2 <- (expression_data["EMP2", ] > 0)
+# seurat_obj_subset$CAR_TACSTD2 <- (expression_data["TACSTD2", ] > 0)
+# seurat_obj_subset$CAR_ITM2B_not <- (expression_data["ITM2B", ] == 0)
+# seurat_obj_subset$CAR_LY6K_EMP2 <- (expression_data["LY6K", ] > 0 & expression_data["EMP2", ] > 0)
+# seurat_obj_subset$CAR_ITM2B_not_EMP2 <- (expression_data["ITM2B", ] == 0 & expression_data["EMP2", ] > 0)
+# seurat_obj_subset$CAR_TACSTD2_EMP2 <- (expression_data["TACSTD2", ] > 0 & expression_data["EMP2", ] > 0)
+# seurat_obj_subset$CAR_LY6K_TACSTD2_EMP2 <- (seurat_obj_subset$CAR_LY6K_EMP2 | seurat_obj_subset$CAR_TACSTD2_EMP2)
+#seurat_obj_subset$CAR_ITM2B_not_TACSTD2_EMP2 <- (seurat_obj_subset$CAR_ITM2B_not_EMP2 | seurat_obj_subset$CAR_TACSTD2_EMP2)
+
+seurat_obj_subset$CAR_ITM2B_not_TACSTD2_EMP2 <- ((expression_data["ITM2B", ] == 0 | expression_data["TACSTD2", ] > 0) & expression_data["EMP2", ] > 0)
+
+
+CAR_targets = c("CAR_FOLR1", "CAR_PROM1", "CAR_CD276", "CAR_NECTIN4", "CAR_LDLRAD3", "CAR_ITM2B_not_TACSTD2_EMP2") 
+my.colors <- c("Expressed" = "red", "Not expressed" = "grey")
+
+for (ct in CAR_targets){
+  seurat_obj_subset$CAR_target = ifelse(seurat_obj_subset[[ct]] == TRUE, "Expressed", "Not expressed")
+  DimPlot(
+    seurat_obj_subset,
+    group.by = "CAR_target",  # Do not group by any metadata
+    label = FALSE,   # Remove labels for groups
+    repel = TRUE,    # Adjust labels to avoid overlap if present
+    raster = FALSE   # Higher quality plot without rasterization
+  ) +
+    scale_color_manual(values = my.colors) + 
+    ggtitle("") +                         
+    labs(x = "UMAP 1", y = "UMAP 2") +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) + 
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) +
+    # theme(
+    #   panel.background = element_rect(fill = "transparent", color = NA),  # Transparent panel background
+    #   plot.background = element_rect(fill = "transparent", color = NA),   # Transparent plot background
+    #   legend.background = element_rect(fill = "transparent", color = NA), # Transparent legend background
+    #   legend.key = element_rect(fill = "transparent", color = NA)         # Transparent legend keys
+    # ) + 
+    NoLegend()                      
+  ggsave(
+    filename = paste0(fig_dir, "UMAP_Bassez_CohortA_BIOKEY_10_tumor_",ct,".pdf"), # Change file extension to .pdf
+    height = 90, 
+    width = 90, 
+    units = "mm", # Ensure units are in mm
+    device = "pdf" # Specify PDF as the output device
+  )
+}
+
+
+
+
+```

@@ -1,0 +1,455 @@
+---
+title: "UMAPs of measured cells in the TME of 17 datasets separately"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+
+# load required package
+```{r, include=FALSE}
+
+#devtools::install_github("mojaveazure/seurat-disk")
+#devtools::install_github('satijalab/seurat-data')
+library(SeuratData)
+library(SeuratDisk)
+
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(Matrix)
+
+# install.packages("ggnewscale")
+library(ggnewscale)
+library(tibble)
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+# server
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
+#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
+surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+surface_genes = as.character(surface_genes[,1])
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+
+
+```
+
+# constants
+```{r}
+
+seurat_files = c(
+                 paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"),
+                 paste0(data_dir,"GSE246613/GSE246613_seu_Tissue.rds"),
+                 paste0(data_dir,"EMTAB8107/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE176078/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortA/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortB/seu_Tissue.rds"),
+                 paste0(data_dir,"Wu_2020_EMBO/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE161529/seu_Tissue.rds"),
+                 paste0(data_dir,"SRP114962/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE140819/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE148673/seu_Tissue_TISCH.rds"),
+                 paste0(data_dir,"GSE150660/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE143423/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE138536/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE118389/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE75688/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE158724/seu_Tissue.rds")
+                 )
+
+dataset_names = c(
+                 "Stefan",
+                 "GSE246613",
+                 "EMTAB8107",
+                 "GSE176078",
+                 "Bassez_CohortA",
+                 "Bassez_CohortB",
+                 "Wu",
+                 "GSE161529",
+                 "SRP114962",
+                 "GSE140819",
+                 "GSE148673",
+                 "GSE150660",
+                 "GSE143423",
+                 "GSE138536",
+                 "GSE118389",
+                 "GSE75688",
+                 "GSE158724"
+                 )
+
+cancerCell_names = list(
+                 "Stefan" = c("Tumor"),
+                 "GSE246613"= c("Tumor"),
+                 "EMTAB8107"= c("Cancer"),
+                 "GSE176078"= c("Cancer Epithelial"),
+                 "Bassez_CohortA"= c("Cancer_cell"),
+                 "Bassez_CohortB"= c("Cancer_cell"),
+                 "Wu"= c("Epithelial_Basal", "Epithelial_Basal_Cycling"),
+                 "GSE161529"= c("Malignant"),
+                 "SRP114962"= c("Malignant"),
+                 "GSE140819"= c("Epithelial cell"),
+                 "GSE148673"= c("Malignant cells"),
+                 "GSE150660"= c("Malignant cells"),
+                 "GSE143423"= c("Malignant cells"),
+                 "GSE138536"= c("Tumor"),
+                 "GSE118389"= c("epithelial"),
+                 "GSE75688"= c("Tumor"),
+                 "GSE158724"= c("Cancer cells")
+                 )
+
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+```
+
+# load seurat objects
+```{r}
+
+seu_list <- list()
+# Populate seu_list with Seurat objects
+for (fn in seurat_files) {
+  print(paste(fn, "in processing ... "))
+  seu_list[[fn]] <- readRDS(file = fn)
+}
+names(seu_list) <- dataset_names
+
+## deal with GSE246613
+seu_list[["GSE246613"]]$cellType <- seu_list[["GSE246613"]]$celltype_all
+seu_list[["GSE246613"]]$celltype_all = NULL
+# Rename the active assay from "originalexp" to "RNA"
+seu_list[["GSE246613"]][["RNA"]] <- seu_list[["GSE246613"]][["originalexp"]]
+DefaultAssay(seu_list[["GSE246613"]]) <- "RNA"
+seu_list[["GSE246613"]][["originalexp"]] <- NULL
+Assays(seu_list[["GSE246613"]])
+seu_list[["GSE246613"]]@assays$RNA@counts[1:5,1:5]
+seu_list[["GSE246613"]]@assays$RNA@data[1:5,1:5]
+
+## load Stefan non-tumor cells and merge to original tumor cell seurat
+#seu_Stefan_tumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"))
+seu_Stefan_nontumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_nonTumor.rds"))
+colnames(seu_Stefan_nontumor@meta.data)
+seu_Stefan_nontumor$patient_id <- seu_Stefan_nontumor$Multiome_ID
+seu_Stefan_nontumor$subtype <- seu_Stefan_nontumor$Subtype
+seu_Stefan_nontumor$cellType <- as.character(seu_Stefan_nontumor$celltype)
+seu_Stefan_nontumor$Multiome_ID = NULL
+seu_Stefan_nontumor$Subtype = NULL
+seu_Stefan_nontumor$celltype = NULL
+unique(seu_Stefan_nontumor$cellType)
+
+#seu_list[["Stefan"]] <- seu_Stefan_tumor
+#colnames(seu_list[["Stefan"]]@meta.data)
+
+seu_list[["Stefan"]]@assays$RNA@layers[["data"]] <- NULL
+seu_list[["Stefan"]]@assays$RNA@layers[["scale.data"]] <- NULL
+seu_list[["Stefan"]][["pca"]] <- NULL
+seu_list[["Stefan"]][["umap"]] <- NULL
+unique(seu_list[["Stefan"]]$patient_id)
+unique(seu_list[["Stefan"]]$cellType)
+
+seu_Stefan <- merge(seu_list[["Stefan"]], y = seu_Stefan_nontumor)
+seu_Stefan <- JoinLayers(seu_Stefan)
+seu_Stefan
+
+colnames(seu_Stefan@meta.data)
+unique(seu_Stefan$patient_id)
+unique(seu_Stefan$subtype)
+unique(seu_Stefan$cellType)
+seu_list[["Stefan"]] <- seu_Stefan
+rm(seu_Stefan, seu_Stefan_nontumor, seu_Stefan_tumor)
+gc()
+
+colnames(seu_list[[1]]@meta.data)
+#unique(seu_list[[1]]$patientID)
+
+# add dataset info to meta data
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  seu_list[[fn]]$dataset = fn
+  #seu_list_sub[[fn]]
+}
+
+# unify patientID and BRCAsubtype
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  print(colnames(seu_list[[fn]]@meta.data))
+}
+datasets_grouped1 = c("Stefan", "EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "GSE158724")
+#datasets_grouped1 = c("EMTAB8107", "GSE176078", "Bassez_CohortA", "Bassez_CohortB", "Wu", "GSE161529", "SRP114962", "GSE140819", "GSE148673", "GSE150660", "GSE143423", "GSE138536", "GSE118389", "GSE75688", "GSE158724")
+datasets_grouped2 = c("GSE246613")
+for (dataset_temp in datasets_grouped1) {
+  patient_id_str = "patient_id" #  GSE246613: PatientID; others: patient_id
+  BRCA_subtype_str = "subtype" #  GSE246613: BRCA_subtype; others: subtype
+  #unique(seu_list[[dataset_temp]][[patient_id_str]])
+  #unique(seu_list[[dataset_temp]][[patient_id_str]][, 1])
+  #unique(seu_list[[dataset_temp]][[BRCA_subtype_str]][, 1])
+  # Direct renaming using colnames
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == patient_id_str
+  ] <- "patientID"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == BRCA_subtype_str
+  ] <- "BRCAsubtype"
+}
+for (dataset_temp in datasets_grouped2) {
+  patient_id_str = "PatientID" 
+  BRCA_subtype_str = "BRCA_subtype"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == patient_id_str
+  ] <- "patientID"
+  colnames(seu_list[[dataset_temp]]@meta.data)[
+    colnames(seu_list[[dataset_temp]]@meta.data) == BRCA_subtype_str
+  ] <- "BRCAsubtype"
+}
+
+seu_list_backup <- seu_list
+
+# Update and print cell types
+for (fn in names(seu_list)) {
+  # Print the current dataset name for clarity
+  print(paste("**************", fn, "**************"))
+  # Update cellType: Assign "Tumor" to cells matching the cancer cell name for this dataset
+  seu_list[[fn]]$cellType[seu_list[[fn]]$cellType %in% cancerCell_names[fn]] <- "Tumor"
+  seu_list[[fn]]$cellType[seu_list[[fn]]$cellType %in% c("Malignant_wrongTISCH_Annotation")] <- "Epithelial"
+  # Capitalize the first letter of all other cell types
+  seu_list[[fn]]$cellType <- sapply(seu_list[[fn]]$cellType, function(x) {
+    paste0(toupper(substring(x, 1, 1)), substring(x, 2))
+  })
+  # Print unique cell types after updates
+  print(unique(seu_list[[fn]]$cellType))
+}
+
+
+
+
+all_genes = c()
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  all_genes = c(all_genes, rownames(seu_list[[fn]]))
+}
+all_genes = unique(all_genes)
+length(all_genes) # 74546 (all 17 datasets); 68688 (15 public datasets)
+
+# Get all gene names (using map_genes_to_hgnc() function in util2.Rmd)
+gene_mapping0 <- map_genes_to_hgnc(all_genes)
+length(gene_mapping0$input_gene) # 74545
+length(unique(gene_mapping0$input_gene)) # 74545
+#gene_mapping0 = gene_mapping0[!duplicated(gene_mapping0$input_gene), ]
+
+## get 19352 protein_coding_genes from "util2.Rmd" (also from paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub.csv"))
+protein_coding_genes = read.csv(paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), header = T)
+protein_coding_genes <- protein_coding_genes$x
+# gene_mapping_proteinCoding <- map_genes_to_hgnc(protein_coding_genes)
+# length(gene_mapping_proteinCoding$input_gene) # 19352
+# length(unique(gene_mapping_proteinCoding$input_gene)) # 19352
+# length(unique(gene_mapping_proteinCoding$updated_gene)) # 19352
+# gene_mapping_proteinCoding[gene_mapping_proteinCoding$input_gene != gene_mapping_proteinCoding$updated_gene,]
+# write.csv(gene_mapping_proteinCoding$updated_gene, paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), row.names = F, quote = F)
+
+keep_genes <- protein_coding_genes
+keep_genes_oldName = gene_mapping0$input_gene[gene_mapping0$updated_gene %in% keep_genes]
+length(keep_genes) # 19352
+length(keep_genes_oldName) # 20538 / 20470
+length(unique(keep_genes_oldName)) # 20538 / 20470
+
+
+
+# filter seurat objects by protein coding genes
+gene_mapping0_filtered = gene_mapping0[gene_mapping0$input_gene %in% keep_genes_oldName, ]
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  gene_names_temp <- rownames(seu_list[[fn]])
+  meta_data <- seu_list[[fn]]@meta.data[c("patientID", "BRCAsubtype", "cellType", "dataset")]
+  keep_genes_temp <- gene_names_temp[gene_names_temp %in% keep_genes_oldName]
+  matched_indices <- match(keep_genes_temp, gene_mapping0_filtered$input_gene)
+  gene_newNames_temp <- gene_mapping0_filtered$updated_gene[matched_indices]
+  # Remove duplicates
+  non_dup_idx <- !duplicated(gene_newNames_temp)
+  keep_genes_temp <- keep_genes_temp[non_dup_idx]
+  matched_indices <- match(keep_genes_temp, gene_mapping0_filtered$input_gene)
+  gene_newNames_temp <- gene_mapping0_filtered$updated_gene[matched_indices]
+  if ("layers" %in% slotNames(seu_list[[fn]]@assays$RNA)){
+    count_matrix <- seu_list[[fn]]@assays$RNA@layers$counts
+  }else{ # GSE246613
+    count_matrix <- seu_list[[fn]]@assays$RNA@counts
+  }
+  rownames(count_matrix) <- rownames(seu_list[[fn]])
+  count_matrix <- count_matrix[keep_genes_temp, , drop = FALSE]
+  rownames(count_matrix) <- gene_newNames_temp
+  colnames(count_matrix) <- rownames(meta_data)
+  new_seurat <- CreateSeuratObject(counts = count_matrix)
+  # add meta_data
+  dim(new_seurat)
+  dim(meta_data)
+  new_seurat@meta.data <- meta_data
+  seu_list[[fn]] <- new_seurat
+}
+
+
+
+# (not tested) filter seurat objects by surface genes
+seu_list_2 <- seu_list
+gene_mapping0_filtered <- surface_genes
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  gene_names_temp <- rownames(seu_list[[fn]])
+  meta_data <- seu_list[[fn]]@meta.data[c("patientID", "BRCAsubtype", "cellType", "dataset")]
+  count_matrix <- seu_list[[fn]]@assays$RNA@layers$counts
+  keep_genes_temp <- intersect(gene_names_temp, surface_genes)
+  rownames(count_matrix) <- rownames(seu_list[[fn]])
+  count_matrix <- count_matrix[keep_genes_temp, , drop = FALSE]
+  rownames(count_matrix) <- gene_newNames_temp
+  colnames(count_matrix) <- rownames(meta_data)
+  new_seurat <- CreateSeuratObject(counts = count_matrix)
+  # add meta_data
+  dim(new_seurat)
+  dim(meta_data)
+  new_seurat@meta.data <- meta_data
+  seu_list_2[[fn]] <- new_seurat
+}
+
+
+```
+
+# Figure S1. UMAPs of datasets clustered by cell types
+```{r}
+
+for (fn in names(seu_list)) {
+  print(paste("**************", fn, "**************"))
+  print(unique(seu_list[[fn]]$cellType))
+}
+
+
+fn <- names(seu_list)[7]
+for (fn in names(seu_list)[8:17]) {
+  print(paste("**************", fn, "**************"))
+  seurat_temp <- seu_list[[fn]]
+  # Extract count matrix
+  count_matrix <- seurat_temp@assays$RNA@layers$counts
+  # Print max count value
+  max_count <- max(count_matrix)
+  print(paste("Max count value:", max_count))
+  # Conditional normalization
+  if (max_count > 50) {
+    print("Normalizing data...")
+    seurat_temp <- NormalizeData(seurat_temp) # log(x/sum(x)*10000+1)
+  } else {
+    print("Data appears already normalized. Setting @data equal to @counts.")
+    # Ensure the data layer is properly set
+    seurat_temp <- SetAssayData(
+      object = seurat_temp,
+      assay = "RNA",
+      layer = "data",
+      new.data = seurat_temp@assays$RNA@layers$counts
+    )
+  }
+  
+  # Find highly variable genes
+  seurat_temp <- FindVariableFeatures(seurat_temp)
+  # Scale the data
+  seurat_temp <- ScaleData(seurat_temp) # pbmc <- SCTransform(pbmc, vars.to.regress = "CC.Difference")
+  # Perform PCA
+  seurat_temp <- RunPCA(seurat_temp, pc.genes = seurat_temp@var.genes)
+  # Perform UMAP
+  seurat_temp <- RunUMAP(seurat_temp, reduction = "pca", dims = 1:30) # separate major cell populations
+  
+  if (fn == "Wu"){
+    seurat_temp$cellType[seurat_temp$cellType %in% c("CD4+ T-cells", "CD8+ T-cells", "T_cells_unassigned", "T-cells Cycling", "Tfh cells", "T-Regs")] <- "T cells"
+    height = 60
+    width = 60*1.7
+  }else{
+    height = 60
+    width = 60*1.4
+  }
+  
+  p2 <- DimPlot(
+    seurat_temp,
+    group.by = "cellType",  # Do not group by any metadata
+    pt.size = 0.01, alpha = 0.5,label.size = 4,
+    label = FALSE,   # Remove labels for groups
+    repel = TRUE,    # Adjust labels to avoid overlap if present
+    raster = FALSE   # Higher quality plot without rasterization
+  ) +
+    #scale_color_manual(values = c("black")) + # Optional: custom colors
+    ggtitle("") +                          # Optional: remove the title
+    labs(x = "UMAP 1", y = "UMAP 2") +
+    scale_color_manual(values = my.colors) +  # Use custom colors for clusters
+    theme(
+      text = element_text(size = 12),  # Set consistent font size for all text
+      axis.title = element_text(size = 12),  # Axis titles
+      axis.text = element_text(size = 12),   # Axis tick labels
+      legend.text = element_text(size = 12), # Legend text
+      #legend.spacing.y = unit(0.03, "cm"),     # Reduce space between legend items
+      legend.key.height = unit(0.5, "lines"),  # Reduce legend spacing
+      legend.title = element_text(size = 12) # Legend title
+    )+
+    guides(
+      color = guide_legend(override.aes = list(size = 0.5))  # Adjust legend dot size here
+    )+
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) + 
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) # + 
+    #NoLegend()                             # Optional: remove the legend
+  ggsave(filename = paste0(fig_dir, "UMAP_",fn,"_allCells.png"), plot = p2, height = height, width = width, dpi = 150, units = "mm")
+
+}
+
+```
+
+

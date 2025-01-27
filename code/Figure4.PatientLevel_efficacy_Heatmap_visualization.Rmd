@@ -1,0 +1,615 @@
+---
+title: "Study patient level efficacy of potential CAR targets"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+Aim: test performance of LogiCAR on patient level, and safety in Tabular Sapien patient level
+
+
+# Connect to server
+```{bash}
+ssh changt7@biowulf.nih.gov
+sinteractive --mem=256g --cpus-per-task=64 --time=24:00:00
+sinteractive --mem=128g --cpus-per-task=32 --gres=gpu:k80:2 --time=24:00:00
+# --gres=lscratch:1024
+module load R/
+R
+
+```
+
+# load required package
+```{r, include=FALSE}
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(AnnotationDbi) 
+
+library(org.Hs.eg.db)
+library(Matrix)
+library(ggplot2)
+
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+
+library(grid)
+library(gridExtra)
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+# server
+shared_data_dir = paste0("/data/Lab_ruppin/tiangen/Database/Transcriptome/")
+data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
+processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
+fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
+
+# local
+data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
+fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
+processed_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/')
+
+
+```
+
+# colors and constants
+```{r}
+
+# Define custom colors for each group
+group_colors <- c(
+  "LogiCAR (N = 5)" = "#08306b",  # Deep blue
+  "LogiCAR (N = 4)" = "#2171b5",  # Dark blue
+  "LogiCAR (N = 3)" = "#4292c6",  # Medium blue
+  "LogiCAR (N = 2)" = "#6baed6",  # Light blue
+  "LogiCAR (N = 1)" = "#9ecae1",  # Very light blue
+  "Kwon et al." = "#006d2c",      # Deep green
+  "Dannenfelser et al." = "#41ab5d",  # Light green
+  "Clinical (BRCA)" = "#cb181d",  # Deep red
+  "Clinical (other tumors)" = "#fb6a4a"  # Light red (pink)
+)
+
+
+```
+
+
+# load data
+```{r}
+
+## load tumor cell expression seurat
+seu_joined <- readRDS(file = paste0(data_dir,"seu_17BRCAdatasets_AllTumorCells_SurfaceGenes_4MetaCol.rds")) # seu_inte_allBRCAdatasets_surfGenes.rds seu_integrated_allBRCAdatasets.rds
+seu_joined$dataset_patient <- paste(seu_joined$dataset, seu_joined$patientID, sep = "_")
+colnames(seu_joined@meta.data)
+## only keep patients with >=500 tumor cells
+length(unique(seu_joined$dataset_patient))
+patient_counts <- table(seu_joined$dataset_patient)
+patients_to_keep <- names(patient_counts[patient_counts >= 500])
+length(patients_to_keep)
+seu_subset <- subset(seu_joined, cells = WhichCells(seu_joined, expression = dataset_patient %in% patients_to_keep))
+
+## get unique patients, and their subtypes, datasets
+meta_data <- seu_subset@meta.data
+meta_data <- meta_data[!duplicated(meta_data$patientID), ]
+meta_data <- meta_data[c("patientID", "BRCAsubtype", "dataset", "dataset_patient")]
+
+expr_Smat <- GetAssayData(seu_subset, layer = "counts")
+expr_Smat <- Matrix(expr_Smat > 0, sparse = TRUE)
+geneNames_true <- rownames(seu_subset)
+expr_Smat <- t(expr_Smat)
+expr_Smat[1:5,1:5]
+
+expr_Smat_negated <- expr_Smat == 0
+expr_Smat_negated <- as(expr_Smat_negated, "CsparseMatrix")
+colnames(expr_Smat_negated) = paste0(geneNames_true, "_not")
+expr_Smat_final_matrix <- cbind(expr_Smat, expr_Smat_negated)
+dim(expr_Smat_final_matrix)
+expr_Smat_final_matrix[1:5,1:5]
+## convert - in gene names to _
+colnames(expr_Smat_final_matrix) = gsub("-", "_", colnames(expr_Smat_final_matrix))
+
+
+
+###### load candidate CARs and logic-gated CARs
+candidate_CARs_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+### select N<=3 candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$geneNum <=3, ]
+### select safety >= 90% candidate CARs
+candidate_CARs_df = candidate_CARs_df[candidate_CARs_df$Safety >=0.9, ]
+
+
+```
+
+# load common functions
+```{r}
+
+source("00.Common_Functions.R")
+
+```
+
+
+# get CAR expression ratio in each patient
+```{r}
+
+## get expression in each cell
+efficacy_res_list <- calcEquivalentExpression2(candidate_CARs_df$LogiCARs, expr_Smat_final_matrix) 
+names(efficacy_res_list) <- candidate_CARs_df$LogiCARs_display
+
+## merge into patients
+unique_patients = unique(seu_subset$dataset_patient)
+aligned_table <- table(seu_subset$dataset_patient)[match(unique_patients, names(table(seu_subset$dataset_patient)))]
+unique_patients_break_points <- c(0, cumsum(as.numeric(aligned_table)))
+
+
+# Initialize the result data frame with the appropriate structure
+result_df <- data.frame(
+  LogiCARs_display = character(), # First column as character
+  matrix(numeric(), ncol = length(unique_patients), nrow = 0) # Rest columns as numeric
+)
+colnames(result_df) <- c("LogiCARs_display", unique_patients) # Set column names
+colnames(result_df)[1:10]
+
+# Loop through the names in safety_res_list
+for (le in names(efficacy_res_list)) {
+  # Calculate Efficacy for each breakpoint
+  Efficacy_vec <- numeric() # Initialize as numeric for better performance
+  for (bp in seq_len(length(unique_patients_break_points) - 1)) {
+    start_pt <- unique_patients_break_points[bp] + 1
+    end_pt <- unique_patients_break_points[bp + 1]
+    Efficacy <- mean(efficacy_res_list[[le]][start_pt:end_pt], na.rm = TRUE) # Avoid NA issues
+    Efficacy_vec <- c(Efficacy_vec, Efficacy)
+  }
+  
+  # Append the results as a new row to the data frame
+  new_row <- data.frame(
+    LogiCARs_display = le, # First column
+    t(Efficacy_vec) # Transpose the vector to match the number of columns
+  )
+  colnames(new_row) <- colnames(result_df) # Ensure the column names match
+  result_df <- rbind(result_df, new_row) # Add the new row to the result_df
+}
+result_df = as.data.frame(result_df)
+result_df[1:5,1:5]
+
+
+
+rownames(result_df) <- result_df$LogiCARs_display
+result_df$LogiCARs_display = NULL
+result_df <- t(result_df)
+result_df = as.data.frame(result_df)
+
+result_df$dataset_patient <- rownames(result_df)
+result_df2 <- merge(result_df, meta_data, by = "dataset_patient")
+#result_df2$dataset_patient = NULL
+#result_df2$patientID = NULL
+
+write.csv(result_df2, file = paste0(data_dir,"17BRCAdatasets_AllPatientsLevel_CAR_efficacy_v2.csv"))
+
+```
+
+
+# Figure 4A. make ComplexHeatmap (rank from high to low)
+```{r}
+
+### load result_df2
+result_df2 = read.csv(file = paste0(data_dir,"17BRCAdatasets_AllPatientsLevel_CAR_efficacy_v2.csv"), check.names = F, row.names = 1)
+
+## set different colors for different LogiCAR names
+candidate_CARs_df$Color <- group_colors[candidate_CARs_df$Group2]
+gene_color_mapping <- setNames(candidate_CARs_df$Color, candidate_CARs_df$LogiCARs_display)
+
+
+# 1. Identify columns for the CAR targets
+car_target_cols <- colnames(result_df2)[2:(nrow(candidate_CARs_df) + 1)]  
+
+# 2. Create a numeric matrix of CAR-target expressions
+# Transpose it so that rows = CAR targets, columns = patients
+mat <- as.matrix(t(result_df2[, car_target_cols]))
+
+# 3. Label the matrix rows and columns
+rownames(mat) <- car_target_cols
+colnames(mat) <- result_df2$dataset_patient
+
+# 4. Rank rows (CAR targets) by their mean values, descending
+row_means <- rowMeans(mat, na.rm = TRUE)       # Calculate mean for each row
+mat <- mat[order(row_means, decreasing = TRUE), ]  # Reorder rows by mean
+
+# 5. Rank columns (patients) by their mean values, descending
+col_means <- colMeans(mat, na.rm = TRUE)       # Calculate mean for each column
+mat <- mat[, order(col_means, decreasing = TRUE)]  # Reorder columns by mean
+
+# 6. Create a data frame for the top annotation (columns annotation)
+ann_col <- data.frame(
+  Subtype = result_df2$BRCAsubtype,
+  Dataset = result_df2$dataset
+)
+rownames(ann_col) <- result_df2$dataset_patient
+ann_col$Subtype[ann_col$Subtype %in% c("ER+", "PR+")] = "HR+"
+ann_col$Subtype[ann_col$Subtype %in% c("HER2", "HER2+", "Luminal-HER2+")] = "HER2+"
+ann_col$Subtype[ann_col$Subtype %in% c("IDC_brain_metastasis")] = "Metastatic"
+ann_col$Subtype[ann_col$Subtype %in% c("LUMINAL A", "Luminal A-like")] = "Luminal A"
+ann_col$Subtype[ann_col$Subtype %in% c("LUMINAL B", "Luminal B-like")] = "Luminal B"
+ann_col$Subtype[ann_col$Dataset %in% c("GSE140819")] = "Metastatic"
+ann_col$Subtype[ann_col$Dataset %in% c("GSE143423")] = "Metastatic"
+unique(ann_col$Subtype)
+
+ann_col$Dataset[ann_col$Dataset %in% c("Stefan")] = "In-house 1"
+ann_col$Dataset[ann_col$Dataset %in% c("GSE246613")] = "In-house 2"
+
+# Reorder the annotations to match the new column order
+ann_col <- ann_col[order(col_means, decreasing = TRUE), ]
+
+# For subtypes (10 types)
+subtype_palette <- colorRampPalette(brewer.pal(8, "Set2"))(6)
+# For datasets (17 types, only 14 have patients with > 500 tumor cells / patient)
+dataset_palette <- colorRampPalette(brewer.pal(8, "Dark2"))(14)
+
+# Unique subtypes and datasets
+#unique_subtypes <- unique(ann_col$Subtype)
+unique_subtypes <- c("Luminal A", "Luminal B", "HER2+", "HR+", "TNBC", "Metastatic")
+#unique_datasets <- unique(ann_col$Dataset)
+unique_datasets = c(
+                 "EMTAB8107",
+                 "GSE176078",
+                 "Bassez_CohortA",
+                 "Bassez_CohortB",
+                 "Wu",
+                 "GSE161529",
+                 "SRP114962",
+                 "GSE140819",
+                 "GSE148673",
+                 "GSE150660",
+                 "GSE143423",
+                 "GSE158724",
+                 "In-house 1",
+                 "In-house 2"
+                 )
+
+# Map colors
+subtype_color_mapping <- setNames(subtype_palette, unique_subtypes)
+dataset_color_mapping <- setNames(dataset_palette, unique_datasets)
+
+# Combine into a list for annotation
+ann_colors <- list(
+  Subtype = subtype_color_mapping,
+  Dataset = dataset_color_mapping
+)
+
+# Extract the row names from the data
+row_names <- rownames(mat)
+# Map row names to colors using gene_color_mapping
+row_colors <- gene_color_mapping[row_names]
+
+# 7. Generate the heatmap without clustering
+pdf(paste0(fig_dir, "PatientLevel_Efficacy_heatmap_17datasets_ranked.pdf"), width = 14, height = 9)
+p <- pheatmap(
+  mat,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  scale = "none",
+  annotation_col = ann_col,
+  annotation_colors = ann_colors,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  #fontsize_row = 8,
+  #fontsize_col = 6,
+  main = "",
+  #gaps_row = 1,  # Add gaps between rows if needed
+  #gaps_col = 1,  # Add gaps between columns if needed
+  #layout_widths = c(5, 2)  # Control space for the heatmap and legend
+  #margins = c(10, 10)  # Adjust margins (bottom, left)
+)
+dev.off()
+
+
+# manually add the y tick labels
+pdf(paste0(fig_dir, "PatientLevel_Efficacy_heatmap_17datasets_ranked_yticklabels.pdf"), width = 3, height = 9)
+grid.newpage()
+# Add custom row names with colors on the left side (right-aligned)
+grid.text(
+  rownames(mat),
+  x = unit(0.95, "npc"),  # Move text closer to the right side
+  y = unit(seq(0.95, 0.05, length.out = length(rownames(mat))), "npc"),  # Evenly space labels
+  just = "right",  # Right-align text
+  gp = gpar(col = gene_color_mapping[rownames(mat)], fontsize = 8)  # Apply colors and font size
+)
+dev.off()
+
+
+
+```
+
+
+# (not used) Figure 4A. make ComplexHeatmap (clutering)
+```{r}
+
+# Install/load pheatmap if not available
+# install.packages("pheatmap")
+library(pheatmap)
+
+## 1. Identify columns for the CAR targets
+##    Here, we assume columns 2 through 70 in result_df2 are the CAR-target expressions.
+car_target_cols <- colnames(result_df2)[2:68]  # adjust to your exact range
+
+## 2. Create a numeric matrix of CAR-target expressions
+##    - We transpose it so that rows = CAR targets, columns = patients.
+##    - Ensure the data is numeric. If your CAR values are continuous or discrete, 
+##      you may need to coerce them to numeric accordingly.
+mat <- as.matrix(t(result_df2[, car_target_cols]))
+
+## 3. Label the matrix rows and columns
+##    - Rows become CAR-target names
+##    - Columns become patient IDs (or sample identifiers)
+rownames(mat) <- car_target_cols
+colnames(mat) <- result_df2$dataset_patient
+
+## 4. Create a data frame for the top annotation (columns annotation)
+##    - Each row here corresponds to one patient/sample (i.e., one column in 'mat')
+##    - Make sure to use the same row order as in the matrix columns 
+##      by setting row names = patient IDs
+ann_col <- data.frame(
+  Subtype = result_df2$BRCAsubtype,
+  Dataset = result_df2$dataset
+)
+rownames(ann_col) <- result_df2$dataset_patient
+
+## 5. (Optional) Define custom colors for the annotations
+##    e.g., you might have subtypes like "Basal", "LumA", "LumB", "HER2", etc.
+##    and datasets like "TCGA", "InHouse1", "InHouse2", etc.
+# ann_colors <- list(
+#   BRCAsubtype = c("Basal"="#E41A1C", "LumA"="#377EB8", "LumB"="#4DAF4A", "HER2"="#984EA3"),
+#   dataset = c("TCGA"="#FF7F00", "InHouse1"="#FFFF33", "InHouse2"="#A65628")
+# )
+
+## 6. Generate the heatmap
+##    - cluster_rows = TRUE: cluster the CAR-target rows
+##    - cluster_cols = TRUE: cluster the patients/samples
+##    - annotation_col: adds a colored bar for each factor in 'ann_col' at the top
+##    - annotation_colors: customizes the annotation color scheme
+pdf(paste0(fig_dir,"PatientLevel_Efficacy_heatmap_17datasets.pdf"), width=18, height=9)
+pheatmap(
+  mat,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  scale = "none",            # or "row"/"column" if you prefer to scale
+  annotation_col = ann_col,  
+  #annotation_colors = ann_colors,
+  show_rownames = TRUE,     
+  show_colnames = FALSE,     # or TRUE if you want to show patient IDs
+  fontsize_row = 8,          # adjust text sizes as needed
+  fontsize_col = 6,
+  main = ""
+)
+dev.off()
+
+```
+
+
+# Figure 4C. (minimal, partial, complete) response rates in patients for each CAR
+```{r}
+
+### need first run Figure 4A to get mat set
+
+# Create a data frame with the desired statistics
+response_df <- data.frame(
+  efficiency_27 = rowMeans(mat > 0.27),  # Ratio of elements > 0.27
+  efficiency_67 = rowMeans(mat > 0.67),  # Ratio of elements > 0.67
+  efficiency_99 = rowMeans(mat > 0.99)   # Ratio of elements > 0.99
+)
+
+# Assign row names to the new data frame for reference
+rownames(response_df) <- rownames(mat)
+
+# View the result
+head(response_df)
+
+
+
+# Load necessary libraries
+library(ggplot2)
+library(reshape2)
+
+# Rank the rows by efficiency_27 (high to low) and reorder the rows for plotting
+response_df$Target <- rownames(response_df)  # Add a column for row names
+response_df <- response_df[order(-response_df$efficiency_27), ]  # Sort by efficiency_27 descending
+response_df$Target <- factor(response_df$Target, levels = response_df$Target)  # Maintain order in plot
+
+response_df[response_df$efficiency_27 == max(response_df$efficiency_27), ]
+response_df[response_df$efficiency_67 == max(response_df$efficiency_67), ]
+response_df[response_df$efficiency_99 == max(response_df$efficiency_99), ]
+
+# Reshape the data into long format for ggplot2
+response_long <- melt(response_df, id.vars = "Target", 
+                      variable.name = "Metric", 
+                      value.name = "Value")
+
+response_long$Metric = as.character(response_long$Metric)
+response_long$Metric[response_long$Metric == "efficiency_27"] = "Efficacy > 27%"
+response_long$Metric[response_long$Metric == "efficiency_67"] = "Efficacy > 66%"
+response_long$Metric[response_long$Metric == "efficiency_99"] = "Efficacy > 99%"
+
+
+# Create the stacked bar plot with original values (no summing)
+gene_color_mapping2 <- gene_color_mapping[levels(response_long$Target)]  # Reorder colors to match x-axis labels
+pdf(paste0(fig_dir,"PatientLevel_Efficacy_heatmap_17datasets.pdf"), width=9, height=4)
+ggplot(response_long, aes(x = Target, y = Value*100, fill = Metric)) +
+  geom_bar(stat = "identity", position = "identity", alpha = 0.7) +  # Overlay bars without summing
+  scale_fill_brewer(palette = "Set2") +  # Colorblind-friendly palette
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5,color = gene_color_mapping2),  
+    legend.position = "none"  # none right
+  )+
+  labs(
+    x = "", 
+    y = "Percentage of patients (%)", 
+    fill = "Group",
+    title = ""
+  )
+dev.off()
+
+```
+
+
+# Figure 4D. the best killing efficacy in each patient
+```{r}
+
+# Load necessary libraries
+library(matrixStats)  # For colMaxs function
+
+### Map dataset_patient to BRCAsubtype
+# Create a named vector for mapping
+mapping_pid_subtype <- setNames(result_df2$BRCAsubtype, result_df2$dataset_patient)
+
+# Calculate the maximum response for each patient (column)
+patient_maxResponse <- colMaxs(mat, na.rm = TRUE)
+
+# Convert patient_maxResponse to a data frame
+patient_maxResponse_df <- data.frame(
+  PatientID = names(patient_maxResponse),  # Extract patient IDs
+  MaxEfficacy = patient_maxResponse,             # Extract maximum response values
+  row.names = NULL                         # Avoid keeping row names
+)
+
+### calculate ratio of patients that are complete, partial and minimal response
+mean(patient_maxResponse_df$MaxEfficacy > 0.99)
+mean(patient_maxResponse_df$MaxEfficacy > 0.66)
+mean(patient_maxResponse_df$MaxEfficacy > 0.27)
+
+NR_patients = patient_maxResponse_df[patient_maxResponse_df$MaxEfficacy <= 0.27, ]
+
+# Create the contingency table
+table <- matrix(c(6, 70, 5, 125), nrow = 2, byrow = TRUE,
+                dimnames = list(
+                  Outcome = c("Success", "Failure"),
+                  Group = c("Group 1", "Group 2")
+                ))
+# Perform the Chi-square test
+chi_sq_result <- chisq.test(table)
+
+# Add the subtype column using mapping_pid_subtype
+patient_maxResponse_df$Subtype <- mapping_pid_subtype[patient_maxResponse_df$PatientID]
+
+patient_maxResponse_df$Subtype[patient_maxResponse_df$Subtype %in% c("ER+", "PR+")] = "HR+"
+patient_maxResponse_df$Subtype[patient_maxResponse_df$Subtype %in% c("HER2", "HER2+", "Luminal-HER2+")] = "HER2+"
+patient_maxResponse_df$Subtype[patient_maxResponse_df$Subtype %in% c("IDC_brain_metastasis")] = "Metastatic"
+patient_maxResponse_df$Subtype[patient_maxResponse_df$Subtype %in% c("LUMINAL A", "Luminal A-like")] = "Luminal A"
+patient_maxResponse_df$Subtype[patient_maxResponse_df$Subtype %in% c("LUMINAL B", "Luminal B-like")] = "Luminal B"
+patient_maxResponse_df$Subtype[grepl("GSE140819", patient_maxResponse_df$PatientID)] = "Metastatic"
+patient_maxResponse_df$Subtype[grepl("GSE143423", patient_maxResponse_df$PatientID)] = "Metastatic"
+
+
+# Load necessary libraries
+library(ggplot2)
+library(RColorBrewer)
+
+# Ensure Subtype is a factor to maintain order
+patient_maxResponse_df$Subtype <- factor(patient_maxResponse_df$Subtype, levels = c("Luminal A", "Luminal B", "HR+", "HER2+", "TNBC", "Metastatic"))
+
+# Rank patients by MaxEfficacy (high to low)
+# Order the dataframe by Subtype, then by MaxEfficacy
+#patient_maxResponse_df <- patient_maxResponse_df[order(-patient_maxResponse_df$MaxEfficacy), ]
+patient_maxResponse_df <- patient_maxResponse_df %>%
+  arrange(Subtype, desc(MaxEfficacy))  # Use desc() for descending order
+patient_maxResponse_df$PatientID <- factor(patient_maxResponse_df$PatientID, levels = patient_maxResponse_df$PatientID)
+
+# Define a color palette for Subtypes
+subtype_palette <- colorRampPalette(brewer.pal(8, "Set2"))(length(unique(patient_maxResponse_df$Subtype)))
+names(subtype_palette) <- unique(patient_maxResponse_df$Subtype)
+
+# Create the bar plot
+pdf(paste0(fig_dir,"PatientLevel_MaxEfficacy_barplot.pdf"), width=8, height=4)
+ggplot(patient_maxResponse_df, aes(x = PatientID, y = MaxEfficacy*100, fill = Subtype)) +
+  geom_bar(stat = "identity", width = 0.8) +  # Bar plot
+  geom_hline(yintercept = c(27, 67, 99), linetype = "dashed", color = "grey", size = 0.5) +  # Add dashed grey lines
+  scale_fill_manual(values = subtype_palette) +  # Use custom color palette
+  scale_y_continuous(limits = c(0, 100)) +  # Set y-axis range
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_blank(),  # Hide x-axis ticks
+    axis.text.x = element_blank(),  # Hide x-axis tick labels
+    axis.title.x = element_blank(),  # Hide x-axis title
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    legend.position = "right"  # none right
+  ) +
+  labs(
+    y = "Maximal efficacy (%)",  # Y-axis label
+    fill = "Subtype",  # Legend title
+    title = ""
+  )
+dev.off()
+
+a <- patient_maxResponse_df[order(-patient_maxResponse_df$MaxEfficacy), ]
+a[a$MaxEfficacy < 0.66,]
+
+```
+
+# Figure 4E. average efficacy in different subtypes
+```{r}
+
+sum(patient_maxResponse_df$MaxEfficacy > 0.27) / nrow(patient_maxResponse_df)
+sum(patient_maxResponse_df$MaxEfficacy > 0.66) / nrow(patient_maxResponse_df)
+sum(patient_maxResponse_df$MaxEfficacy > 0.99) / nrow(patient_maxResponse_df)
+
+patient_maxResponse_df$Subtype <- as.character(patient_maxResponse_df$Subtype)
+
+# Create the boxplot with scatter points
+pdf(paste0(fig_dir,"SubtypeLevel_MaxEfficacy_boxplot.pdf"), width=3, height=4)
+ggplot(patient_maxResponse_df, aes(x = reorder(Subtype, -MaxEfficacy, FUN = median), y = MaxEfficacy * 100, color = Subtype)) +
+  geom_boxplot(outlier.shape = NA, color = "black", fill = NA) +  # Boxplot with black elements
+  geom_jitter(width = 0.2, alpha = 0.7, size = 2) +  # Add scatter points with jitter to avoid overlap
+  scale_color_manual(values = subtype_palette) +  # Use custom colors for scatter points
+  theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.y = element_text(color = "black"),  # Assign colors to y-axis tick labels
+    axis.text.x = element_text(color = "black", angle = 45, hjust = 1),  
+    legend.position = "none" # right none
+  ) + 
+  labs(
+    x = "Subtype",
+    y = "Max Efficacy (%)",
+    title = ""
+  )
+dev.off()
+
+a = patient_maxResponse_df$MaxEfficacy[patient_maxResponse_df$Subtype == "TNBC"]
+b = patient_maxResponse_df$MaxEfficacy[patient_maxResponse_df$Subtype == "Metastatic"] # Luminal A  Luminal B   HR+   HER2+   Metastatic   TNBC    
+wilcox.test(a,b)
+
+
+
+
+
+```
+
