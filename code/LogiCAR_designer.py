@@ -23,7 +23,7 @@ Description: Design triplet-gene CAR-T using genetic algorithm
         -o: the identified (near-)optimal triplet-gene combination for CAR-T (e.g. ./output/HNSC_GSE103322_optimal_triplets.txt)
 # improvement:
 1. extend from 3-gene combination to N-gene combination
-2. move pred_power_calculator() and evalLogicGate*() functions to utils_v2.py for better readability
+2. move pred_power_calculator() and evalLogicGate*() functions to utils.py for better readability
 3. set max_generation = 400 to force quit evolution after 400 generations
 
 How to run this program? e.g.
@@ -137,8 +137,8 @@ def createHelp():
     return op
 
 
-#exec(open('./utils_v2.py').read())
-exec(open('./utils_v3.py').read())
+#exec(open('./utils.py').read())
+exec(open('./utils.py').read())
 
 def setup_toolbox(df, combination_type):
     gene_num = len(combination_type.replace("_", "")) + 1
