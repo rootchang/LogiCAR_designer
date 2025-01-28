@@ -12,19 +12,7 @@ vignette: >
 ---
 
 
-Aim: test performance of LogiCAR on patient level, and safety in Tabular Sapien patient level
 
-
-# Connect to server
-```{bash}
-ssh changt7@biowulf.nih.gov
-sinteractive --mem=64g --cpus-per-task=16 --time=24:00:00
-sinteractive --mem=128g --cpus-per-task=32 --gres=gpu:k80:2 --time=24:00:00
-# --gres=lscratch:1024
-module load R/
-R
-
-```
 
 # load required package
 ```{r, include=FALSE}
@@ -35,36 +23,25 @@ library(ggplot2)
 library(stringr)
 library(tidyr)
 library(AnnotationDbi) 
-
 library(org.Hs.eg.db)
 library(Matrix)
-library(ggplot2)
-
 library(pheatmap)
 library(RColorBrewer)
 library(viridis)
-
 library(grid)
 library(gridExtra)
-
-library(tibble)  # Load the tibble package for rownames_to_column()
+library(tibble)
 
 ```
 
 # set input and output directories & parameters
 ```{r}
 
-# server
-shared_data_dir = paste0("/data/Lab_ruppin/tiangen/Database/Transcriptome/")
-data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
-processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
-fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
-
-# local
-data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
-fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
-processed_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/')
-
+data_dir <- paste0('/02.Input/')
+processed_dir <- paste0('/03.Results/')
+fig_dir = paste0('/03.Results/Figures/')
+surface_genes = read.csv(file = "/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) 
+surface_genes = as.character(surface_genes[,1])
 
 ```
 
@@ -81,7 +58,7 @@ group_colors <- c(
 
 ```
 
-# (run on server, for once only!) get the max personalized efficacy for each patient in Stefan cohort 
+# Get the max personalized efficacy for each patient in Stefan cohort 
 ```{r}
 
 ## patient IDs
@@ -102,10 +79,9 @@ result_df <- data.frame(
 for (pp in Stefan_patients) {
   # Construct the result directory path
   result_dir_path_temp <- paste0(
-    "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/", 
+    "/01.Scripts/Triplet_CART_designer/output/", 
     "Stefan_", pp, "_allTumorCells/"
   )
-  
   # Read the doublets file
   doublets_file <- paste0(result_dir_path_temp, "Stefan_", pp, "_allTumorCells_optimal_doublets_merged.txt")
   if (file.exists(doublets_file)) {
@@ -115,7 +91,6 @@ for (pp in Stefan_patients) {
     warning(paste("Doublets file not found for patient:", pp))
     max_score_doublets <- NA
   }
-  
   # Read the triplets file
   triplets_file <- paste0(result_dir_path_temp, "Stefan_", pp, "_allTumorCells_optimal_triplets_merged.txt")
   if (file.exists(triplets_file)) {
@@ -125,23 +100,17 @@ for (pp in Stefan_patients) {
     warning(paste("Triplets file not found for patient:", pp))
     max_score_triplets <- NA
   }
-  
   # Calculate the maximum score
   max_score <- max(max_score_doublets, max_score_triplets, na.rm = TRUE)
-  
   # Append the result to the data frame
   result_df <- rbind(result_df, data.frame(patientID = pp, max_score = max_score, stringsAsFactors = FALSE))
 }
 
-# View the final result
-print(result_df)
-
-write.csv(result_df, file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Stefan_cohort_personalized_efficacy_66patients.csv", quote = FALSE, row.names = F)
-
+write.csv(result_df, file = "/03.Results/Stefan_cohort_personalized_efficacy_66patients.csv", quote = FALSE, row.names = F)
 
 ```
 
-# STable 3. top 50 personalized efficacy for each patient in Stefan cohort 
+# TableS3. top 50 personalized efficacy for each patient in Stefan cohort 
 ```{r}
 
 Stefan_patients <- c("AA_10", "AA_11", "AA_13", "AA_14", "AA_15", "AA_16", "AA_18", "AA_19", "AA_2", "AA_21", "AA_22", "AA_23", "AA_24", "AA_25", "AA_27", "AA_28", "AA_3", "AA_30", "AA_31", "AA_32", "AA_4", "AA_5", "AA_6", "AA_7", "AA_8", "AA_9", "Af_1", "Af_10", "Af_11", "Af_12", "Af_13", "Af_15", "Af_16", "Af_17", "Af_18", "Af_19", "Af_2", "Af_21", "Af_23", "Af_24", "Af_25", "Af_3", "Af_5", "Af_6", "Af_7", "Af_8", "Af_9", "EA_1", "EA_10", "EA_11", "EA_12", "EA_13", "EA_14", "EA_15", "EA_16", "EA_18", "EA_19", "EA_20", "EA_21", "EA_24", "EA_25", "EA_3", "EA_4", "EA_5", "EA_6", "EA_9")
@@ -159,10 +128,9 @@ result_df <- data.frame(
 for (pp in Stefan_patients) {
   # Construct the result directory path
   result_dir_path_temp <- paste0(
-    "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/", 
+    "/01.Scripts/Triplet_CART_designer/output/", 
     "Stefan_", pp, "_allTumorCells/"
   )
-  
   # Read the doublets file
   doublets_file <- paste0(result_dir_path_temp, "Stefan_", pp, "_allTumorCells_optimal_doublets_merged.txt")
   if (file.exists(doublets_file)) {
@@ -171,7 +139,6 @@ for (pp in Stefan_patients) {
     warning(paste("Doublets file not found for patient:", pp))
     doublets_data <- data.frame(Gates = character(), Genes = character(), Score = numeric(), stringsAsFactors = FALSE)
   }
-  
   # Read the triplets file
   triplets_file <- paste0(result_dir_path_temp, "Stefan_", pp, "_allTumorCells_optimal_triplets_merged.txt")
   if (file.exists(triplets_file)) {
@@ -180,28 +147,19 @@ for (pp in Stefan_patients) {
     warning(paste("Triplets file not found for patient:", pp))
     triplets_data <- data.frame(Gates = character(), Genes = character(), Score = numeric(), stringsAsFactors = FALSE)
   }
-  
   # Combine doublets and triplets data
   combined_data <- rbind(doublets_data, triplets_data)
-  
   # Sort by Score in descending order
   combined_data <- combined_data[order(-combined_data$Score), ]
-  
   # Select the top 50 solutions
   top_50 <- head(combined_data, 50)
-  
   # Add patient ID to the top 50 solutions
   top_50$patientID <- pp
-  
   # Append the result to the data frame
   result_df <- rbind(result_df, top_50)
 }
 
-# View the final result
-print(result_df)
-
-write.csv(result_df, file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Stefan_cohort_personalized_LogiCARs_and_Efficacy_66patients.csv", quote = FALSE, row.names = F)
-
+write.csv(result_df, file = "/03.Results/TableS3.csv", quote = FALSE, row.names = F)
 
 ```
 
@@ -209,7 +167,7 @@ write.csv(result_df, file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CAR
 ```{r}
 
 #### load personalized best scores for Stefan cohort 66 patients
-max_scores_df <- read.csv("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Stefan_cohort_personalized_efficacy_66patients.csv")
+max_scores_df <- read.csv("/03.Results/Stefan_cohort_personalized_efficacy_66patients.csv")
 
 #### load common_CARs
 common_CARs_df = read.csv(file = paste0(data_dir,"17BRCAdatasets_AllPatientsLevel_CAR_efficacy_v2.csv"), check.names = F, row.names = 1)
@@ -217,9 +175,7 @@ common_CARs_df = read.csv(file = paste0(data_dir,"17BRCAdatasets_AllPatientsLeve
 stefan_Cols <- grepl("Stefan", common_CARs_df$dataset_patient)
 common_CARs_df <- common_CARs_df[stefan_Cols, ]
 common_CARs_df <- merge(common_CARs_df, max_scores_df, by = "patientID")
-
 patient_subtype = paste0(common_CARs_df$patientID, "-", common_CARs_df$BRCAsubtype)
-
 common_CARs_df$dataset = NULL
 common_CARs_df$dataset_patient = NULL
 common_CARs_df$patientID = NULL
@@ -228,33 +184,27 @@ common_CARs_df$BRCAsubtype = NULL
 common_CARs_df <- data.frame(t(common_CARs_df))
 colnames(common_CARs_df) <- patient_subtype
 common_CARs_df$LogiCARs_display <- rownames(common_CARs_df)
-common_CARs_df[1:5,1:5]
-dim(common_CARs_df)
 
 ### map CARs to different groups
-candidate_CARs_df = read.csv(paste0("/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
+candidate_CARs_df = read.csv(paste0("/01.Scripts/Triplet_CART_designer/output/safety90/filtered_top_logiCARs_efficacy_safety_17Datasets.csv"))
 candidate_CARs_Groups_df <- candidate_CARs_df[c("LogiCARs_display", "Group2")]
 grouped_CARs_df <- merge(common_CARs_df, candidate_CARs_Groups_df, by = "LogiCARs_display", all.x = T)
 grouped_CARs_df$Group2[is.na(grouped_CARs_df$Group2)] <- "Personalized LogiCAR"
-
 grouped_CARs_df$mean_efficacy <- rowMeans(grouped_CARs_df[2:(sum(stefan_Cols)+1)])
 
 ### remove targets that overlap between logiCAR designer and previous methods
 grouped_CARs_df <- grouped_CARs_df[!grepl("\\*", grouped_CARs_df$LogiCARs_display), ]
-
 grouped_CARs_df$Group2[grouped_CARs_df$Group2 %in% c("LogiCAR (N = 3)", "LogiCAR (N = 2)", "LogiCAR (N = 1)")] = "Best general LogiCAR"
 grouped_CARs_df$Group2[grouped_CARs_df$Group2 %in% c("Kwon et al.")] = "Best Kwon et al."
 grouped_CARs_df$Group2[grouped_CARs_df$Group2 %in% c("Dannenfelser et al.")] = "Best Dannenfelser et al."
 grouped_CARs_df$Group2[grouped_CARs_df$Group2 %in% c("Clinical (BRCA)")] = "Best clinical (BRCA)"
 grouped_CARs_df$Group2[grouped_CARs_df$Group2 %in% c("Clinical (other tumors)")] = "Best clinical (other tumors)"
 
-
 # Get rows with max mean_efficacy for each Group
 max_efficacy_rows <- grouped_CARs_df %>%
   group_by(Group2) %>%
   filter(mean_efficacy == max(mean_efficacy, na.rm = TRUE)) %>%
   ungroup()
-
 
 max_score_vec = as.numeric(max_efficacy_rows[max_efficacy_rows$LogiCARs_display=="max_score", 2:67])
 mean(max_score_vec > 0.99)
@@ -266,7 +216,6 @@ mean(max_score_vec > 0.27)
 
 # Figure 5D. barplot showing enhancement of efficacy using personalized CARs
 ```{r}
-
 
 # Extract patient names and subtypes from column names
 patient_data <- max_efficacy_rows %>%
@@ -286,17 +235,12 @@ bar_data <- patient_data %>%
 scatter_data <- patient_data %>%
   filter(Group2 != "Personalized LogiCAR")
 
-
-
 # Order patients within each subtype by efficacy
 bar_data <- bar_data %>%
   group_by(subtype) %>%
   arrange(desc(efficacy), .by_group = TRUE) %>%
   ungroup() %>%
   mutate(patient = factor(patient, levels = unique(patient)))
-
-
-
 
 # Define colors for subtypes
 subtype_palette <- colorRampPalette(brewer.pal(8, "Set2"))(6)
@@ -325,8 +269,7 @@ scatter_shapes <- c(
 scatter_data$Group2 <- factor(scatter_data$Group2, levels = c("Best clinical (other tumors)", "Best clinical (BRCA)", "Best Dannenfelser et al.", "Best Kwon et al.", "Best general LogiCAR"))
 
 # Save the plot as a PDF
-pdf(paste0(fig_dir, "PatientLevel_MaxEfficacy_barplot_Stefan.pdf"), width = 10, height = 4.2)
-
+pdf(paste0(fig_dir, "Figure5D_PatientLevel_MaxEfficacy_barplot_Stefan.pdf"), width = 10, height = 4.2)
 # Create the plot
 ggplot() +
   # Add bars
@@ -364,10 +307,7 @@ ggplot() +
     panel.border = element_blank(), 
     legend.position = "right"  # Legend position
   ) +
-  # Labels
   labs(x = "Patient", y = "Efficacy (%)", title = "")
-
-# Close the PDF device
 dev.off()
 
 ```
@@ -382,7 +322,6 @@ efficay_df[1:6,1:6]
 
 row_medians <- rowMedians(as.matrix(efficay_df[, sapply(efficay_df, is.numeric)]))
 row_means <- rowMeans(as.matrix(efficay_df[, sapply(efficay_df, is.numeric)]))
-
 
 # Reshape the data into long format
 efficay_long <- efficay_df %>%
@@ -402,10 +341,8 @@ group_colors <- c(
   "Personalized LogiCAR" = "#08306b"             # Black
 )
 
-
-
 # Create the boxplot with scatter points
-pdf(paste0(fig_dir, "Patient_Efficacy_Stefan_Personalized_vs_general_CARs_boxplot.pdf"), width = 3*0.8, height = 4*0.8)
+pdf(paste0(fig_dir, "Figure5E_Patient_Efficacy_Stefan_Personalized_vs_general_CARs_boxplot.pdf"), width = 3*0.8, height = 4*0.8)
 ggplot(efficay_long, aes(x = Group, y = Efficacy * 100, fill = Group)) +
   # Add scatter points
   geom_jitter(aes(color = Group), width = 0.2, alpha = 0.7, size = 2) +
@@ -416,7 +353,6 @@ ggplot(efficay_long, aes(x = Group, y = Efficacy * 100, fill = Group)) +
   scale_color_manual(values = group_colors, name = "Group") +
   # Fix y-axis range
   scale_y_continuous(limits = c(0, 100)) +
-  # Theme adjustments
   theme(
     panel.grid = element_blank(), 
     panel.background = element_rect(fill = "white"),
@@ -429,7 +365,6 @@ ggplot(efficay_long, aes(x = Group, y = Efficacy * 100, fill = Group)) +
     axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "black"),  
     legend.position = "none"  # Legend position
   ) + 
-  # Labels
   labs(
     x = "",
     y = "Efficacy (%)",
@@ -441,6 +376,5 @@ a = as.numeric(efficay_df["Personalized LogiCAR", ])
 b = as.numeric(efficay_df["Best Dannenfelser et al.", ]) # "Best clinical (other tumors)", "Best clinical (BRCA)", "Best Dannenfelser et al.", "Best Kwon et al.", "Best general LogiCAR"
 wilcox.test(a,b)
 wilcox.test(a,b, paired = T)
-
 
 ```

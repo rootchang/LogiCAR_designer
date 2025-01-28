@@ -1,8 +1,6 @@
 #! usr/bin/env python
 
 # a collection of pre_processsing(), pred_power_calculator() and evalLogicGate*() functions for calculation of results of N-gene logicGates.
-# improvement:
-# 1. Destroy unnecessary variables to release memory in function pre_processing(). 2024-06-08
 
 # Define global parameter
 specificity_cutoff = 0.9 # 0.8 0.9 should use 0.9 to match average safety score of clinical targets!!!

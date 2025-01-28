@@ -1,5 +1,5 @@
 ---
-title: "UMAP visualization of BRCA tumor cells from multiple cohorts and normal tissue cells from HPA"
+title: "LogiCAR is super fast"
 author: "Tiangen Chang tiangen.chang@nih.gov"
 output: 
   rmarkdown::html_vignette:
@@ -13,27 +13,15 @@ vignette: >
 
 
 
-# Connect to server
-```{bash}
-ssh changt7@biowulf.nih.gov
-sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
-# --gres=lscratch:1024
-module load R/
-R
-
-```
-
-
 # load required package
 ```{r, include=FALSE}
 
 library(dplyr)
 library(ggplot2)
-
 library(tidyr)
 library(data.table)
-
 library(purrr)
+library(scales)
 
 ```
 
@@ -42,59 +30,27 @@ library(purrr)
 # set input and output directories & parameters
 ```{r}
 
-# server
-data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/01.Scripts/Triplet_CART_designer/output/')
-processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
-fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
-
-my.colors <- c(
-  "#E41A1C", # Bright Red
-  "#377EB8", # Bright Blue
-  "#4DAF4A", # Green
-  "#984EA3", # Purple
-  "#FF7F00", # Orange
-  "#FFFF33", # Yellow
-  "#A65628", # Brown
-  "#F781BF", # Pink
-  "#999999", # Gray
-  "#66C2A5", # Turquoise
-  "#FC8D62", # Salmon
-  "#8DA0CB", # Light Blue
-  "#E78AC3", # Light Pink
-  "#A6D854", # Lime Green
-  "#FFD92F", # Light Yellow
-  "#E5C494", # Beige
-  "#7570B3", # Blue-Violet
-  "#5B1A18", # Deep Brown/Maroon
-  "#8E6E53", # Taupe
-  "#CAB2D6", # Light Purple
-  "#1B9E77"  # Teal
-)
-
-
-my.colors <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
-
+data_dir <- paste0('/02.Input/')
+processed_dir <- paste0('/03.Results/')
+fig_dir = paste0('/03.Results/Figures/')
+surface_genes = read.csv(file = "/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) 
+surface_genes = as.character(surface_genes[,1])
 
 ```
 
-# Figure 2a. barplot of Time complexity comparison between exhaustive search and LogiCAR Designer
+# Figure 2A. barplot of Time complexity comparison between exhaustive search and LogiCAR Designer
 ```{r}
-
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(scales)
 
 surface_genes = 2716
 
 x = c("N = 2", "N = 3", "N = 4", "N = 5")
 x <- factor(x, levels = x)
 y1 = c(choose(surface_genes, 2) *6, choose(surface_genes, 3) *20, choose(surface_genes, 4) *70, choose(surface_genes, 5) *252)
-y2 = 1000*10*c(2*100,4*500,12*800,40*1000) # 2, 4, 12, 40. # 200, 400, 800, and 1000
+y2 = 1000*10*c(2*100,4*500,12*800,40*1000)
 baseline = y2[1]
 y1 <- y1/baseline
 y2 <- y2/baseline
-y2[1] <- 1.1*y2[1]  # add a bit to ease display it on the plot
+y2[1] <- 1.1*y2[1]  # add a bit to ease display on the plot
 
 # Create a data frame
 data <- data.frame(
@@ -138,29 +94,24 @@ p <- ggplot(data_long, aes(x = x, y = Value, fill = Group)) +
     axis.text.y = element_text(color = "black"),
     panel.border = element_blank(), 
     axis.text.x = element_text(color = "black", angle = 45, hjust = 1),  
-    legend.position = "none"  # Legend position (none, right, etc.)
+    legend.position = "none" 
   )
-
-
-# Print the plot
 print(p)
-
-# Save the plot as a PDF
 ggsave(
-  filename = paste0(fig_dir, "Time_complexity_comparison.pdf"),  # Output file name
+  filename = paste0(fig_dir, "Figure2A_Time_complexity_comparison.pdf"),  # Output file name
   plot = p,  # Plot object
   width = 3 * 0.7,  # Width in inches
   height = 3.5 * 0.7,  # Height in inches
-  device = "pdf"  # Save as PDF
+  device = "pdf" 
 )
 
 ```
 
-# extract max score of LogiCAR Designer in each generation for N genes (N = 2,3,4,5)
+# Extract max score of LogiCAR Designer in each generation for N genes (N = 2,3,4,5)
 ```{r}
 
 Ngene_logiCARs = c("doublets", "triplets", "quadruples", "quintuplets")
-DiffTumorCells_dir = c("safety90/", "GSE246613_Patient16_allTumorCells/", "GSE161529_patient0135_500TumorCells/") #  "15BRCAdatasets_TNBC/", 
+DiffTumorCells_dir = c("safety90/", "GSE246613_Patient16_allTumorCells/", "GSE161529_patient0135_500TumorCells/")
 
 ############ safety90 (72.4k tumor cells from 15 public datasets)
 #data_dir_temp <- paste0(data_dir, DiffTumorCells_dir[1])
@@ -182,28 +133,22 @@ for (i in 1:length(Ngene_logiCARs)) {
     pattern = paste0("GSE161529_patient0135_500TumorCells_optimal_", Ngene_logiCARs[i], "_.*_GAlog.txt"),
     full.names = TRUE
   )
-  
   # Function to read a file and extract the Score column
   read_file_scores <- function(file) {
     read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
       select(Generation, Score)
   }
-  
   # Read all files and extract Scores
   all_scores <- map_dfr(file_list, read_file_scores, .id = "File")
-  
   # Calculate the maximum score for each generation
   max_scores <- all_scores %>%
     group_by(Generation) %>%
     summarise(Max_Score = max(Score, na.rm = TRUE)) %>%
     arrange(Generation)
-  
   # Rename the Max_Score column to the current Ngene_logiCARs value
   colnames(max_scores)[2] <- Ngene_logiCARs[i]
-  
   # Merge with result_df, keeping all generations and filling in NA for missing values
   result_df <- full_join(result_df, max_scores, by = "Generation")
-  
   # Print the intermediate result
   print(max_scores)
 }
@@ -211,23 +156,16 @@ for (i in 1:length(Ngene_logiCARs)) {
 # Sort the final result_df by Generation
 result_df <- result_df %>% arrange(Generation)
 
-# Print the final result
-print(result_df)
 #write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_74kTumorCells.csv"))
 #write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_8kTumorCells.csv"))
 write.csv(result_df, file = paste0(processed_dir, "Max_Score_vs_Generation_0.5kTumorCells.csv"))
 
-
-
-
-
 ```
 
-
-# Figure 2b. lineplot of convergence speed of LogiCAR Designer
+# Figure S2A. lineplot of convergence speed of LogiCAR Designer
 ```{r}
 
-processed_dir = "/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/"
+processed_dir = "/03.Results/"
 fig_dir = paste0(processed_dir, "Figures/")
 result_df = read.csv(file = paste0(processed_dir, "Max_Score_vs_Generation_74kTumorCells.csv"), row.names = 1)
 #result_df = read.csv(file = paste0(processed_dir, "Max_Score_vs_Generation_8kTumorCells.csv"), row.names = 1)
@@ -243,13 +181,11 @@ earliest_generations <- numeric()
 for (col in colnames(result_df)[-1]) {
   # Find the maximum value in the column (ignoring NAs)
   max_value <- max(result_df[[col]], na.rm = TRUE)
-  
   # Find the earliest row (Generation) where the maximum value occurs
   earliest_row <- result_df %>%
     filter(.data[[col]] == max_value) %>%  # Filter rows where the column equals the max value
     slice_min(Generation) %>%  # Get the row with the smallest Generation
     pull(Generation)  # Extract the Generation value
-  
   # Store the result
   earliest_generations <- c(earliest_generations, earliest_row)
 }
@@ -263,7 +199,7 @@ earliest_results <- data.frame(
 # Print the result
 print(earliest_results)
 
-stop_row = 900 # max(earliest_results$Earliest_Generation)
+stop_row = 900
 result_df2 <- result_df[1:stop_row, ]
 
 
@@ -285,8 +221,6 @@ result_df2 <- result_df2 %>%
 
 # Print the updated data frame
 print(result_df2)
-
-
 
 # Reshape the data into long format
 result_df2_long <- result_df2 %>%
@@ -327,7 +261,7 @@ p <- ggplot(result_df2_long, aes(x = Generation, y = Score * 100, color = Catego
     data = earliest_results,  # Add points for the earliest generations
     aes(x = Generation, y = Score * 100, color = "Optimum"),  # Map to "Optimum" in the legend
     shape = 17,  # Solid triangle
-    size = 2  # Adjust size as needed
+    size = 2 
   ) +
   scale_color_manual(values = my.colors, labels = legend_labels) +  # Assign custom colors and labels
   labs(
@@ -352,12 +286,7 @@ p <- ggplot(result_df2_long, aes(x = Generation, y = Score * 100, color = Catego
     axis.text.x = element_text(color = "black"),  
     legend.position = "none"  # none right
   )
-
-
-# Print the plot
 print(p)
-
-# Save the plot as a PDF
 ggsave(
   #filename = paste0(fig_dir, "Max_Score_vs_Generation_74kTumorCells.pdf"),  # Output file name
   filename = paste0(fig_dir, "Max_Score_vs_Generation_8kTumorCells.pdf"),  # Output file name
@@ -365,13 +294,8 @@ ggsave(
   plot = p,  # Plot object
   width = 4 * 0.7,  # Width in inches
   height = 3.5 * 0.7,  # Height in inches
-  device = "pdf"  # Save as PDF
+  device = "pdf"
 )
 
-
-
-
 ```
-
-
 

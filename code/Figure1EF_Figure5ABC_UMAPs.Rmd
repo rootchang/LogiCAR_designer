@@ -1,0 +1,346 @@
+---
+title: "UMAP visualization of tumor cells from multiple BRCA cohorts, and barplot of normal cell counts from HPA"
+author: "Tiangen Chang tiangen.chang@nih.gov"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+# load required package
+```{r, include=FALSE}
+
+library(SeuratData)
+library(SeuratDisk)
+library(caret)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(SeuratWrappers)
+library(patchwork)
+library(RColorBrewer)
+library(stringr)
+library(tidyr)
+library(data.table)
+library(harmony)
+
+```
+
+# set input and output directories & parameters
+```{r}
+
+data_dir <- paste0('/02.Input/')
+processed_dir <- paste0('/03.Results/')
+fig_dir = paste0('/03.Results/Figures/')
+surface_genes = read.csv(file = "/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) 
+surface_genes = as.character(surface_genes[,1])
+
+seurat_files = c(
+                 paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"),
+                 paste0(data_dir,"GSE246613/GSE246613_seu_Tissue.rds"),
+                 paste0(data_dir,"EMTAB8107/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE176078/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortA/seu_Tissue.rds"),
+                 paste0(data_dir,"Bassez_2021_NatMed/CohortB/seu_Tissue.rds"),
+                 paste0(data_dir,"Wu_2020_EMBO/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE161529/seu_Tissue.rds"),
+                 paste0(data_dir,"SRP114962/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE140819/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE148673/seu_Tissue_TISCH.rds"),
+                 paste0(data_dir,"GSE150660/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE143423/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE138536/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE118389/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE75688/seu_Tissue.rds"),
+                 paste0(data_dir,"GSE158724/seu_Tissue.rds")
+                 )
+
+dataset_names = c(
+                 "Stefan",
+                 "GSE246613",
+                 "EMTAB8107",
+                 "GSE176078",
+                 "Bassez_CohortA",
+                 "Bassez_CohortB",
+                 "Wu",
+                 "GSE161529",
+                 "SRP114962",
+                 "GSE140819",
+                 "GSE148673",
+                 "GSE150660",
+                 "GSE143423",
+                 "GSE138536",
+                 "GSE118389",
+                 "GSE75688",
+                 "GSE158724"
+                 )
+
+cancerCell_names = list(
+                 "Stefan" = c("Tumor"),
+                 "GSE246613"= c("Tumor"),
+                 "EMTAB8107"= c("Cancer"),
+                 "GSE176078"= c("Cancer Epithelial"),
+                 "Bassez_CohortA"= c("Cancer_cell"),
+                 "Bassez_CohortB"= c("Cancer_cell"),
+                 "Wu"= c("Epithelial_Basal", "Epithelial_Basal_Cycling"),
+                 "GSE161529"= c("Malignant"),
+                 "SRP114962"= c("Malignant"),
+                 "GSE140819"= c("Epithelial cell"),
+                 "GSE148673"= c("Malignant cells"),
+                 "GSE150660"= c("Malignant cells"),
+                 "GSE143423"= c("Malignant cells"),
+                 "GSE138536"= c("Tumor"),
+                 "GSE118389"= c("epithelial"),
+                 "GSE75688"= c("Tumor"),
+                 "GSE158724"= c("Cancer cells")
+                 )
+
+my.colors <- c(
+  "#E41A1C", # Bright Red
+  "#377EB8", # Bright Blue
+  "#4DAF4A", # Green
+  "#984EA3", # Purple
+  "#FF7F00", # Orange
+  "#FFFF33", # Yellow
+  "#A65628", # Brown
+  "#F781BF", # Pink
+  "#999999", # Gray
+  "#66C2A5", # Turquoise
+  "#FC8D62", # Salmon
+  "#8DA0CB", # Light Blue
+  "#E78AC3", # Light Pink
+  "#A6D854", # Lime Green
+  "#FFD92F", # Light Yellow
+  "#E5C494", # Beige
+  "#7570B3", # Blue-Violet
+  "#5B1A18", # Deep Brown/Maroon
+  "#8E6E53", # Taupe
+  "#CAB2D6", # Light Purple
+  "#1B9E77"  # Teal
+)
+
+
+```
+
+
+
+# Harmony integration of tumor cells from multiple cohorts based on cell surface genes
+```{r}
+
+seu_list <- list()
+# Populate seu_list with Seurat objects
+for (fn in seurat_files) {
+  print(paste(fn, "in processing ... "))
+  seu_list[[fn]] <- readRDS(file = fn)
+}
+names(seu_list) <- dataset_names
+
+seu_list[["GSE246613"]]$cellType = seu_list[["GSE246613"]]$celltype_all
+# Rename the active assay from "originalexp" to "RNA"
+seu_list[["GSE246613"]][["RNA"]] <- seu_list[["GSE246613"]][["originalexp"]]
+DefaultAssay(seu_list[["GSE246613"]]) <- "RNA"
+seu_list[["GSE246613"]][["originalexp"]] <- NULL
+Assays(seu_list[["GSE246613"]])
+
+# Iterate through seu_list and filter based on genes and cell types
+seu_list_sub <- list()
+for (i in names(seu_list)) {
+  print(paste("The", i, " dataset is in processing ..."))
+  # Get the current Seurat object
+  obj <- seu_list[[i]]
+  # Keep only the surface genes that exist in the object's features
+  keep_genes <- intersect(surface_genes, rownames(obj))
+  # Keep only the cells with the specified cell types
+  keep_cells <- obj$cellType %in% cancerCell_names[[i]]
+  # Subset the Seurat object
+  obj_sub <- subset(obj, features = keep_genes)
+  obj_sub <- subset(obj_sub, cells = which(keep_cells))
+  # Add to the list
+  seu_list_sub[[i]] <- obj_sub
+}
+
+# Normalize & scale each object (if not already done)
+seu_list_sub <- lapply(seu_list_sub, function(obj) {
+  obj <- NormalizeData(obj)                      # log-normalize by default
+  obj <- FindVariableFeatures(obj, nfeatures = 2000)  # pick top variable genes
+  obj <- ScaleData(obj)                          # ScaleData() is applied to variable features
+  return(obj)
+})
+
+# Merge all objects into one, then run PCA & Harmony
+for (fn in names(seu_list_sub)) {
+  print(paste("**************", fn, "**************"))
+  seu_list_sub[[fn]]$dataset = fn
+}
+combined <- merge(seu_list_sub[[1]],
+                  y = seu_list_sub[2:length(seu_list_sub)],
+                  project = "BRCA_Tumor")
+combined <- JoinLayers(combined)
+# Set "RNA" as the active assay
+DefaultAssay(combined) <- "RNA"
+# Run PCA
+combined <- RunPCA(combined, npcs = 30, verbose = FALSE)
+
+combined <- RunHarmony(
+  object = combined,
+  group.by.vars = "dataset", 
+  assay.use = "RNA",
+  #reduction = "pca"
+  dims.use = 1:30
+)
+
+# Clustering
+# Use the Harmony reduction
+combined <- RunUMAP(combined, reduction = "harmony", dims = 1:30)
+combined <- FindNeighbors(combined, reduction = "harmony", dims = 1:30)
+combined <- FindClusters(combined, resolution = 0.5)
+combined$clusters_res0.5 <- combined$seurat_clusters
+combined <- FindClusters(combined, resolution = 0.3)
+combined$clusters_res0.3 <- combined$seurat_clusters
+combined <- FindClusters(combined, resolution = 0.1)
+combined$clusters_res0.1 <- combined$seurat_clusters
+
+### merge small clusters (with < 5000 cells) into one 
+unique(combined$seurat_clusters)
+table(combined$seurat_clusters)
+cluster_counts <- table(combined$seurat_clusters)
+small_clusters <- names(cluster_counts[cluster_counts < 5000])
+### Create a new metadata column, merging small clusters
+combined$new_clusters <- ifelse(
+  combined$seurat_clusters %in% small_clusters,
+  "Small clusters",  # Label for merged small clusters
+  as.character(combined$seurat_clusters)  # Keep original cluster names
+)
+
+# Find top markers per cluster
+Idents(combined) <- "new_clusters"
+markers <- FindAllMarkers(
+  combined,
+  assay = "RNA",
+  only.pos = TRUE,
+  logfc.threshold = 0.5,
+  min.pct = 0.25
+)
+
+# Select top 1-3 markers for each cluster
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 10)  # top N markers
+print(top_markers, n = 170)
+
+#### manual annotation of clusters (with top DEGs related to BRCA)
+combined$anno_clusters <- combined$new_clusters
+map = c(
+  "0" = "LY6E+/BST2+/CD24+",
+  "1" = "KCNJ3+/PTPRT+/SLC39A6+",
+  "2" = "EGFR+/PROM1+/CDH3+",
+  "3" = "ERBB2+/ABCC11+/ITGB6+",
+  "4" = "TFPI+/F3+/AREG+",
+  "5" = "CXCR4+/VTCN1+/CD74+",
+  "6" = "PDGFRB+/ITGA11+/ADAM12+",
+  "7" = "IGF1R+",
+  "8" = "STS+",
+  "9" = "ROBO2+",
+  "10" = "NTRK2+",
+  "11" = "SEMA5A+",
+  "12" = "PTPRD+",
+  "13" = "ALK+",
+  "14" = "CEACAM20+",
+  "15" = "TGFA+",
+  "16" = "DCC+",
+  "Small clusters" = "Small clusters"
+)
+combined$anno_clusters <- as.character(map[as.character(combined$anno_clusters)])
+combined$anno_clusters = factor(combined$anno_clusters, levels = as.character(map))
+
+saveRDS(combined, file = paste0(data_dir,"seu_inte_allBRCAdatasets_surfGenes.rds"))
+
+```
+
+
+# Figure 1E. UMAP visualization of tumor cells from multiple cohorts 
+```{r}
+
+seu_combined = readRDS(file = paste0(data_dir,"seu_inte_allBRCAdatasets_surfGenes.rds"))
+
+p2 = DimPlot(seu_combined, reduction = "umap", group.by = "anno_clusters", pt.size = 1, alpha = 0.6, label.size = 4,repel = T,label = F, raster=T)+ # NoLegend()+
+  scale_color_manual(values = my.colors)+
+  labs(x = "UMAP 1", y = "UMAP 2") +  # Set axis labels
+  ggtitle("")
+ggsave(filename = paste0(fig_dir, "UMAP_allBRCAdatasets_tumorCells_integrated_annotated.png"), plot = p2, height = 120, width = 120*1.8, dpi = 300, units = "mm")
+
+```
+
+# Figure 5ABC (upper panels). UMAP visualization of tumor cells from three TNBC patients respectively
+```{r}
+
+seu_combined = readRDS(file = paste0(data_dir,"seu_inte_allBRCAdatasets_surfGenes.rds"))
+
+seu_GSE161529 <- subset(seu_combined, subset = dataset == "GSE161529")
+seu_GSE161529_0135 <- subset(seu_GSE161529, subset = patient_id == "patient: 0135")
+
+seu_GSE246613 <- subset(seu_combined, subset = dataset == "GSE246613")
+seu_GSE246613_11 <- subset(seu_GSE246613, subset = PatientID == "Patient11")
+
+seu_Bassez_CohortA <- subset(seu_combined, subset = dataset == "Bassez_CohortA")
+seu_Bassez_CohortA_BIOKEY_10 <- subset(seu_Bassez_CohortA, subset = patient_id == "BIOKEY_10")
+
+
+plot_patient = "GSE161529_0135" # GSE161529_0135  GSE246613_11 Bassez_CohortA_BIOKEY_10
+
+if (plot_patient == "GSE161529_0135"){
+  UMAP_plot_seu <- seu_GSE161529_0135
+}else if (plot_patient == "GSE246613_11"){
+  UMAP_plot_seu <- seu_GSE246613_11
+}else if (plot_patient == "Bassez_CohortA_BIOKEY_10"){
+  UMAP_plot_seu <- seu_Bassez_CohortA_BIOKEY_10
+}
+
+p2 = DimPlot(UMAP_plot_seu, reduction = "umap", group.by = "anno_clusters", pt.size = 3, alpha = 1, label.size = 4,repel = T,label = F, raster=T)+ # NoLegend()+
+  scale_color_manual(values = my.colors)+
+  labs(x = "UMAP 1", y = "UMAP 2") +  # Set axis labels
+  ggtitle("")
+ggsave(filename = paste0(fig_dir, "UMAP_",plot_patient,"_tumorCells_integrated_annotated.png"), plot = p2, height = 120, width = 120*1.8, dpi = 300, units = "mm")
+
+```
+
+
+# Figure 1F. cell numbers of 31 normal tissues
+```{r}
+
+# read in data
+HPA_cellNums = read.csv(file = "/02.Input/HPA/version24_20241022/rna/rna_single_cell_datasets.tsv", sep = "\t")
+
+# Create the bar plot
+pdf(paste0(fig_dir, "HPA_cellNums_Tissues.pdf"), width = 6, height = 3)
+ggplot(HPA_cellNums, aes(x = Tissue, y = Cell.count / 1000, fill = Tissue)) +
+  geom_bar(stat = "identity") + 
+  labs(
+    x = "Tissue",  # X-axis label
+    y = "Cell count (thousand cells)",  
+    title = "" 
+  ) +
+    theme(
+    panel.grid = element_blank(), 
+    panel.background = element_rect(fill = "white"),
+    axis.line.y = element_line(color = "black"),
+    axis.line.x = element_line(color = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.ticks.x = element_line(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    panel.border = element_blank(), 
+    axis.text.x = element_text(angle = 50, hjust = 1, color = "black"),  
+    legend.position = "none"
+  )+
+  scale_fill_manual(values = rainbow(nrow(HPA_cellNums)))
+dev.off()
+
+```
+
+

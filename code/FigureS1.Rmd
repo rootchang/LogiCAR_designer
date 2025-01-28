@@ -13,25 +13,11 @@ vignette: >
 
 
 
-# Connect to server
-```{bash}
-ssh changt7@biowulf.nih.gov
-sinteractive --mem=512g --cpus-per-task=64 --time=24:00:00
-# --gres=lscratch:1024
-module load R/
-R
-
-```
-
-
 # load required package
 ```{r, include=FALSE}
 
-#devtools::install_github("mojaveazure/seurat-disk")
-#devtools::install_github('satijalab/seurat-data')
 library(SeuratData)
 library(SeuratDisk)
-
 library(caret)
 library(Seurat)
 library(dplyr)
@@ -44,8 +30,6 @@ library(stringr)
 library(tidyr)
 library(data.table)
 library(Matrix)
-
-# install.packages("ggnewscale")
 library(ggnewscale)
 library(tibble)
 
@@ -54,19 +38,11 @@ library(tibble)
 # set input and output directories & parameters
 ```{r}
 
-# server
-data_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/')
-processed_dir <- paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/')
-fig_dir = paste0('/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/03.Results/Figures/')
-#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/intersection_and_clinical.txt", header = F)
-#surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical.txt", header = T) # 2786 genes
-surface_genes = read.csv(file = "/data/Lab_ruppin/tiangen/CancerProject/08.Sanna_CART/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) # 2758 genes
+data_dir <- paste0('/02.Input/')
+processed_dir <- paste0('/03.Results/')
+fig_dir = paste0('/03.Results/Figures/')
+surface_genes = read.csv(file = "/02.Input/Constants/cell_surface_genes_wgene_and_clinical_uniqueStandardNames.txt", header = T) 
 surface_genes = as.character(surface_genes[,1])
-
-# local
-data_dir <- paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/02.Input/')
-fig_dir = paste0('/Users/changt7/Documents/00.PostDocWork/CancerResearch/01.Projects/00.Collaborating_projects/08.Sanna_CART/03.Results/Figures/')
-
 
 ```
 
@@ -183,7 +159,6 @@ seu_list[["GSE246613"]]@assays$RNA@counts[1:5,1:5]
 seu_list[["GSE246613"]]@assays$RNA@data[1:5,1:5]
 
 ## load Stefan non-tumor cells and merge to original tumor cell seurat
-#seu_Stefan_tumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_Tumor.rds"))
 seu_Stefan_nontumor <- readRDS(file = paste0(data_dir,"Stefan_snRNAseq/Multiomics82_nonTumor.rds"))
 colnames(seu_Stefan_nontumor@meta.data)
 seu_Stefan_nontumor$patient_id <- seu_Stefan_nontumor$Multiome_ID
@@ -194,30 +169,17 @@ seu_Stefan_nontumor$Subtype = NULL
 seu_Stefan_nontumor$celltype = NULL
 unique(seu_Stefan_nontumor$cellType)
 
-#seu_list[["Stefan"]] <- seu_Stefan_tumor
-#colnames(seu_list[["Stefan"]]@meta.data)
-
 seu_list[["Stefan"]]@assays$RNA@layers[["data"]] <- NULL
 seu_list[["Stefan"]]@assays$RNA@layers[["scale.data"]] <- NULL
 seu_list[["Stefan"]][["pca"]] <- NULL
 seu_list[["Stefan"]][["umap"]] <- NULL
-unique(seu_list[["Stefan"]]$patient_id)
-unique(seu_list[["Stefan"]]$cellType)
 
 seu_Stefan <- merge(seu_list[["Stefan"]], y = seu_Stefan_nontumor)
 seu_Stefan <- JoinLayers(seu_Stefan)
-seu_Stefan
 
-colnames(seu_Stefan@meta.data)
-unique(seu_Stefan$patient_id)
-unique(seu_Stefan$subtype)
-unique(seu_Stefan$cellType)
 seu_list[["Stefan"]] <- seu_Stefan
 rm(seu_Stefan, seu_Stefan_nontumor, seu_Stefan_tumor)
 gc()
-
-colnames(seu_list[[1]]@meta.data)
-#unique(seu_list[[1]]$patientID)
 
 # add dataset info to meta data
 for (fn in names(seu_list)) {
@@ -237,9 +199,6 @@ datasets_grouped2 = c("GSE246613")
 for (dataset_temp in datasets_grouped1) {
   patient_id_str = "patient_id" #  GSE246613: PatientID; others: patient_id
   BRCA_subtype_str = "subtype" #  GSE246613: BRCA_subtype; others: subtype
-  #unique(seu_list[[dataset_temp]][[patient_id_str]])
-  #unique(seu_list[[dataset_temp]][[patient_id_str]][, 1])
-  #unique(seu_list[[dataset_temp]][[BRCA_subtype_str]][, 1])
   # Direct renaming using colnames
   colnames(seu_list[[dataset_temp]]@meta.data)[
     colnames(seu_list[[dataset_temp]]@meta.data) == patient_id_str
@@ -259,8 +218,6 @@ for (dataset_temp in datasets_grouped2) {
   ] <- "BRCAsubtype"
 }
 
-seu_list_backup <- seu_list
-
 # Update and print cell types
 for (fn in names(seu_list)) {
   # Print the current dataset name for clarity
@@ -272,12 +229,7 @@ for (fn in names(seu_list)) {
   seu_list[[fn]]$cellType <- sapply(seu_list[[fn]]$cellType, function(x) {
     paste0(toupper(substring(x, 1, 1)), substring(x, 2))
   })
-  # Print unique cell types after updates
-  print(unique(seu_list[[fn]]$cellType))
 }
-
-
-
 
 all_genes = c()
 for (fn in names(seu_list)) {
@@ -285,31 +237,15 @@ for (fn in names(seu_list)) {
   all_genes = c(all_genes, rownames(seu_list[[fn]]))
 }
 all_genes = unique(all_genes)
-length(all_genes) # 74546 (all 17 datasets); 68688 (15 public datasets)
 
 # Get all gene names (using map_genes_to_hgnc() function in util2.Rmd)
 gene_mapping0 <- map_genes_to_hgnc(all_genes)
-length(gene_mapping0$input_gene) # 74545
-length(unique(gene_mapping0$input_gene)) # 74545
-#gene_mapping0 = gene_mapping0[!duplicated(gene_mapping0$input_gene), ]
 
 ## get 19352 protein_coding_genes from "util2.Rmd" (also from paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub.csv"))
 protein_coding_genes = read.csv(paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), header = T)
 protein_coding_genes <- protein_coding_genes$x
-# gene_mapping_proteinCoding <- map_genes_to_hgnc(protein_coding_genes)
-# length(gene_mapping_proteinCoding$input_gene) # 19352
-# length(unique(gene_mapping_proteinCoding$input_gene)) # 19352
-# length(unique(gene_mapping_proteinCoding$updated_gene)) # 19352
-# gene_mapping_proteinCoding[gene_mapping_proteinCoding$input_gene != gene_mapping_proteinCoding$updated_gene,]
-# write.csv(gene_mapping_proteinCoding$updated_gene, paste0("/data/Lab_ruppin/tiangen/Database/", "protein_coding_genes_consensus_org.Hs.eg.db_biomaRt_AnnotationHub_updatedGeneSymbols.csv"), row.names = F, quote = F)
-
 keep_genes <- protein_coding_genes
 keep_genes_oldName = gene_mapping0$input_gene[gene_mapping0$updated_gene %in% keep_genes]
-length(keep_genes) # 19352
-length(keep_genes_oldName) # 20538 / 20470
-length(unique(keep_genes_oldName)) # 20538 / 20470
-
-
 
 # filter seurat objects by protein coding genes
 gene_mapping0_filtered = gene_mapping0[gene_mapping0$input_gene %in% keep_genes_oldName, ]
@@ -336,56 +272,21 @@ for (fn in names(seu_list)) {
   colnames(count_matrix) <- rownames(meta_data)
   new_seurat <- CreateSeuratObject(counts = count_matrix)
   # add meta_data
-  dim(new_seurat)
-  dim(meta_data)
   new_seurat@meta.data <- meta_data
   seu_list[[fn]] <- new_seurat
 }
-
-
-
-# (not tested) filter seurat objects by surface genes
-seu_list_2 <- seu_list
-gene_mapping0_filtered <- surface_genes
-for (fn in names(seu_list)) {
-  print(paste("**************", fn, "**************"))
-  gene_names_temp <- rownames(seu_list[[fn]])
-  meta_data <- seu_list[[fn]]@meta.data[c("patientID", "BRCAsubtype", "cellType", "dataset")]
-  count_matrix <- seu_list[[fn]]@assays$RNA@layers$counts
-  keep_genes_temp <- intersect(gene_names_temp, surface_genes)
-  rownames(count_matrix) <- rownames(seu_list[[fn]])
-  count_matrix <- count_matrix[keep_genes_temp, , drop = FALSE]
-  rownames(count_matrix) <- gene_newNames_temp
-  colnames(count_matrix) <- rownames(meta_data)
-  new_seurat <- CreateSeuratObject(counts = count_matrix)
-  # add meta_data
-  dim(new_seurat)
-  dim(meta_data)
-  new_seurat@meta.data <- meta_data
-  seu_list_2[[fn]] <- new_seurat
-}
-
 
 ```
 
 # Figure S1. UMAPs of datasets clustered by cell types
 ```{r}
 
-for (fn in names(seu_list)) {
-  print(paste("**************", fn, "**************"))
-  print(unique(seu_list[[fn]]$cellType))
-}
-
-
-fn <- names(seu_list)[7]
-for (fn in names(seu_list)[8:17]) {
+for (fn in names(seu_list)[1:17]) {
   print(paste("**************", fn, "**************"))
   seurat_temp <- seu_list[[fn]]
   # Extract count matrix
   count_matrix <- seurat_temp@assays$RNA@layers$counts
-  # Print max count value
   max_count <- max(count_matrix)
-  print(paste("Max count value:", max_count))
   # Conditional normalization
   if (max_count > 50) {
     print("Normalizing data...")
@@ -427,7 +328,6 @@ for (fn in names(seu_list)[8:17]) {
     repel = TRUE,    # Adjust labels to avoid overlap if present
     raster = FALSE   # Higher quality plot without rasterization
   ) +
-    #scale_color_manual(values = c("black")) + # Optional: custom colors
     ggtitle("") +                          # Optional: remove the title
     labs(x = "UMAP 1", y = "UMAP 2") +
     scale_color_manual(values = my.colors) +  # Use custom colors for clusters
@@ -444,10 +344,8 @@ for (fn in names(seu_list)[8:17]) {
       color = guide_legend(override.aes = list(size = 0.5))  # Adjust legend dot size here
     )+
     scale_x_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) + 
-    scale_y_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1)) # + 
-    #NoLegend()                             # Optional: remove the legend
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 4), labels = scales::number_format(accuracy = 1))
   ggsave(filename = paste0(fig_dir, "UMAP_",fn,"_allCells.png"), plot = p2, height = height, width = width, dpi = 150, units = "mm")
-
 }
 
 ```
